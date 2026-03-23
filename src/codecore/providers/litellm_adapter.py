@@ -18,6 +18,15 @@ class LiteLLMAdapter:
     def __init__(self, route: ProviderRoute) -> None:
         self._route = route
 
+    def _resolve_litellm_model(self) -> str:
+        model_id = self._route.model_id.strip()
+        if "/" in model_id:
+            return model_id
+        provider = self._route.provider_id.strip()
+        if not provider:
+            return model_id
+        return f"{provider}/{model_id}"
+
     def _resolve_api_key(self) -> str | None:
         auth = self._route.auth_strategy
         if not auth:
@@ -38,7 +47,7 @@ class LiteLLMAdapter:
 
         started = perf_counter()
         response = await acompletion(
-            model=self._route.model_id,
+            model=self._resolve_litellm_model(),
             messages=messages,
             api_base=self._route.base_url,
             api_key=api_key,
