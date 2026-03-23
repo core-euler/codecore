@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from rich.console import Console
 
+from .agents import MultiAgentRunner
 from .bootstrap import BootstrapContext, bootstrap_application
 from .context.composer import DefaultContextComposer
 from .context.manager import ContextManager
@@ -18,6 +19,7 @@ from .execution.git import GitWorkspace
 from .execution.patches import PatchService
 from .execution.shell import ShellToolExecutor
 from .execution.tests import VerificationRunner
+from .execution.worktrees import WorktreeManager
 from .governance.policy import SimplePolicyEngine
 from .kernel.event_bus import EventBus
 from .kernel.orchestrator import Orchestrator
@@ -66,6 +68,7 @@ def create_app() -> CodeCoreApp:
     workspace_files = WorkspaceFiles(bootstrap.settings.project_root, bootstrap.settings.artifact_dir)
     patch_service = PatchService(workspace_files)
     git_workspace = GitWorkspace(bootstrap.settings.project_root)
+    worktree_manager = WorktreeManager(bootstrap.settings.project_root, bootstrap.settings.artifact_dir / "worktrees")
     file_change_audit = FileChangeAudit(bootstrap.settings.artifact_dir / "file-changes.jsonl")
     approval_manager = ApprovalManager()
     verification_runner = VerificationRunner(tool_executor, bootstrap.settings.project_root)
@@ -94,6 +97,17 @@ def create_app() -> CodeCoreApp:
         preferred_aliases=tuple(bootstrap.project_manifest.providers.preferred_aliases),
         allow_vpn_routes=bootstrap.project_manifest.providers.allow_vpn_routes,
     )
+    multi_agent_runner = MultiAgentRunner(
+        project_root=bootstrap.settings.project_root,
+        artifact_dir=bootstrap.settings.artifact_dir,
+        session=bootstrap.session,
+        runtime_state=bootstrap.runtime_state,
+        broker=broker,
+        health_service=health_service,
+        adapter_factory=adapter_factory,
+        event_bus=event_bus,
+        worktree_manager=worktree_manager,
+    )
     orchestrator = Orchestrator(
         session=bootstrap.session,
         runtime_state=bootstrap.runtime_state,
@@ -106,6 +120,7 @@ def create_app() -> CodeCoreApp:
         event_bus=event_bus,
         skill_registry=skill_registry,
         analytics_service=analytics_service,
+        multi_agent_runner=multi_agent_runner,
         tool_executor=tool_executor,
         policy_engine=policy_engine,
         git_workspace=git_workspace,

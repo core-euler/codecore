@@ -4,14 +4,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from ..agents import MultiAgentRunner
 from ..context.manager import ContextManager
 from ..domain.contracts import ContextComposer, PolicyEngine, SkillRegistry, ToolExecutor, VerificationEngine
 from ..domain.enums import EventKind, PolicyAction, RiskLevel, TaskTag
 from ..domain.events import EventEnvelope
 from ..domain.models import ChatMessage, ChatRequest
+from ..execution.changesets import ChangeSet, ChangeSetApplier, ChangeSetEntry
 from ..domain.results import PolicyDecision, VerificationResult
 from ..execution.audit import FileChangeAudit
 from ..execution.approvals import ApprovalManager
+from ..execution.editing import EditOperation, EditPlan, StructuredEditParser
 from ..execution.git import GitWorkspace
 from ..execution.patches import PatchService
 from ..execution.sandbox import SandboxProfile
@@ -27,6 +30,25 @@ from ..providers.registry import ProviderRegistry
 from ..telemetry.analytics import TelemetryAnalytics
 from ..ui.commands import HELP_TEXT
 
+AUTOEDIT_SYSTEM_PROMPT = """Return only JSON with exact text replacements.
+Schema:
+{
+  "edits": [
+    {
+      "path": "relative/path.py",
+      "old": "exact existing text",
+      "new": "replacement text",
+      "reason": "short explanation"
+    }
+  ]
+}
+Rules:
+- edit only active files provided in context
+- each file may appear at most once
+- use exact snippets that exist exactly once
+- do not include markdown, prose, or code fences unless the entire response is a json code fence
+"""
+
 
 @dataclass(slots=True)
 class Orchestrator:
@@ -41,6 +63,7 @@ class Orchestrator:
     event_bus: EventBus
     skill_registry: SkillRegistry | None = None
     analytics_service: TelemetryAnalytics | None = None
+    multi_agent_runner: MultiAgentRunner | None = None
     tool_executor: ToolExecutor | None = None
     policy_engine: PolicyEngine | None = None
     git_workspace: GitWorkspace | None = None
@@ -48,6 +71,7 @@ class Orchestrator:
     file_change_audit: FileChangeAudit | None = None
     approval_manager: ApprovalManager | None = None
     verification_engine: VerificationEngine | None = None
+    edit_parser: StructuredEditParser = field(default_factory=StructuredEditParser)
     command_router: CommandRouter = field(init=False)
 
     def __post_init__(self) -> None:
@@ -55,7 +79,11 @@ class Orchestrator:
         self.command_router.register("help", self._cmd_help)
         self.command_router.register("status", self._cmd_status)
         self.command_router.register("stats", self._cmd_stats)
+        self.command_router.register("pipelines", self._cmd_pipelines)
+        self.command_router.register("delegate", self._cmd_delegate)
+        self.command_router.register("benchmark", self._cmd_benchmark)
         self.command_router.register("run", self._cmd_run)
+        self.command_router.register("autoedit", self._cmd_autoedit)
         self.command_router.register("replace", self._cmd_replace)
         self.command_router.register("rollback", self._cmd_rollback)
         self.command_router.register("retry", self._cmd_retry)
@@ -114,12 +142,15 @@ class Orchestrator:
             model_hint=self.runtime_state.manual_model_alias,
         )
         request = await self.context_composer.compose(request)
+        return await self._invoke_request(prompt, request, turn_id=turn.turn_id)
+
+    async def _invoke_request(self, prompt: str, request: ChatRequest, *, turn_id: str) -> CommandResult:
         if self.session.active_skills:
             await self.event_bus.publish(
                 EventEnvelope.create(
                     kind=EventKind.SKILL_ACTIVATED,
                     session_id=self.session.session_id,
-                    turn_id=turn.turn_id,
+                    turn_id=turn_id,
                     task_tag=self.session.task_tag,
                     skill_ids=tuple(self.session.active_skills),
                     payload={"pinned_skills": tuple(self.runtime_state.active_skills)},
@@ -138,7 +169,7 @@ class Orchestrator:
                 EventEnvelope.create(
                     kind=EventKind.PROVIDER_SELECTED,
                     session_id=self.session.session_id,
-                    turn_id=turn.turn_id,
+                    turn_id=turn_id,
                     task_tag=self.session.task_tag,
                     provider_id=route.provider_id,
                     model_id=route.model_id,
@@ -158,7 +189,7 @@ class Orchestrator:
                         EventEnvelope.create(
                             kind=EventKind.FALLBACK_TRIGGERED,
                             session_id=self.session.session_id,
-                            turn_id=turn.turn_id,
+                            turn_id=turn_id,
                             task_tag=self.session.task_tag,
                             provider_id=route.provider_id,
                             model_id=route.model_id,
@@ -178,12 +209,12 @@ class Orchestrator:
             self.session.request_count += 1
             self.session.total_cost_usd += result.cost_usd or 0.0
             self.session.last_model_alias = route.alias or route.model_id
-            self.session.last_turn_id = turn.turn_id
+            self.session.last_turn_id = turn_id
             await self.event_bus.publish(
                 EventEnvelope.create(
                     kind=EventKind.MODEL_INVOKED,
                     session_id=self.session.session_id,
-                    turn_id=turn.turn_id,
+                    turn_id=turn_id,
                     task_tag=self.session.task_tag,
                     provider_id=route.provider_id,
                     model_id=route.model_id,
@@ -249,6 +280,153 @@ class Orchestrator:
         report = self.analytics_service.build_report(task_tag=self.session.task_tag)
         return CommandResult(output=report.render_text())
 
+    async def _cmd_pipelines(self, _: list[str]) -> CommandResult:
+        if self.multi_agent_runner is None:
+            return CommandResult(output="Multi-agent runner is not configured.", is_error=True)
+        current = self.runtime_state.active_pipeline or "<none>"
+        lines = [f"active_pipeline={current}"]
+        for pipeline in self.multi_agent_runner.list_pipelines():
+            roles = " -> ".join(role.value for role in pipeline.roles)
+            lines.append(f"{pipeline.pipeline_id}: {roles} | {pipeline.description}")
+        return CommandResult(output="\n".join(lines))
+
+    async def _cmd_delegate(self, args: list[str]) -> CommandResult:
+        if self.multi_agent_runner is None:
+            return CommandResult(output="Multi-agent runner is not configured.", is_error=True)
+        if not args:
+            return CommandResult(output="Usage: /delegate [--pipeline <id>] [--verify] [--apply] <instruction>", is_error=True)
+        verify_requested = False
+        apply_requested = False
+        pipeline_hint: str | None = None
+        index = 0
+        while index < len(args):
+            token = args[index]
+            if token == "--verify":
+                verify_requested = True
+                index += 1
+                continue
+            if token == "--apply":
+                apply_requested = True
+                index += 1
+                continue
+            if token == "--pipeline":
+                if index + 1 >= len(args):
+                    return CommandResult(output="Usage: /delegate [--pipeline <id>] [--verify] [--apply] <instruction>", is_error=True)
+                pipeline_hint = args[index + 1]
+                index += 2
+                continue
+            break
+        instruction = " ".join(args[index:]).strip()
+        if not instruction:
+            return CommandResult(output="Usage: /delegate [--pipeline <id>] [--verify] [--apply] <instruction>", is_error=True)
+        if not self.session.active_files:
+            return CommandResult(output="Delegate requires active files. Use /add first.", is_error=True)
+        try:
+            result = await self.multi_agent_runner.run(
+                instruction=instruction,
+                active_files=tuple(self.session.active_files),
+                task_tag=self.session.task_tag,
+                pipeline_hint=pipeline_hint,
+                verify_requested=verify_requested,
+            )
+        except (KeyError, RuntimeError, ValueError) as exc:
+            self._remember_failure("delegate", instruction, str(exc))
+            return CommandResult(output=str(exc), is_error=True)
+        self.runtime_state.active_pipeline = result.pipeline_id
+        is_error = bool(result.review is not None and not result.review.approved)
+        if result.evaluation is not None and result.evaluation.status == "failed":
+            is_error = True
+        if apply_requested:
+            if result.change_set is None or result.change_set.is_empty():
+                return CommandResult(
+                    output=result.summary + "\n\nNo isolated change set is available for apply-back.",
+                    is_error=True,
+                )
+            if not result.merge_ready:
+                return CommandResult(
+                    output=result.summary + "\n\nApply-back is unavailable because review or evaluation did not approve the change set.",
+                    is_error=True,
+                )
+            if self.approval_manager is None or self.patch_service is None:
+                return CommandResult(output="Apply-back is not configured.", is_error=True)
+            decision = PolicyDecision(
+                action=PolicyAction.REQUIRE_APPROVAL,
+                risk_level=RiskLevel.WORKSPACE_WRITE,
+                reason=f"Applying {len(result.change_set.entries)} change-set file(s) will mutate the main workspace.",
+                safer_alternative="Inspect the isolated workspace diff before approving apply-back.",
+            )
+            approval = await self._request_approval_or_block(
+                "delegate-apply",
+                f"delegate apply {instruction}",
+                decision,
+                metadata=self._serialize_change_set(result.change_set),
+            )
+            return CommandResult(output=result.summary + "\n\n" + approval.output, is_error=approval.is_error)
+        return CommandResult(output=result.summary, is_error=is_error)
+
+    async def _cmd_benchmark(self, args: list[str]) -> CommandResult:
+        if self.multi_agent_runner is None:
+            return CommandResult(output="Multi-agent runner is not configured.", is_error=True)
+        if not args:
+            return CommandResult(
+                output="Usage: /benchmark [--models a,b] [--pipeline <id>] [--verify] <instruction>",
+                is_error=True,
+            )
+        verify_requested = False
+        pipeline_hint: str | None = None
+        model_aliases: tuple[str, ...] = ()
+        index = 0
+        while index < len(args):
+            token = args[index]
+            if token == "--verify":
+                verify_requested = True
+                index += 1
+                continue
+            if token == "--pipeline":
+                if index + 1 >= len(args):
+                    return CommandResult(
+                        output="Usage: /benchmark [--models a,b] [--pipeline <id>] [--verify] <instruction>",
+                        is_error=True,
+                    )
+                pipeline_hint = args[index + 1]
+                index += 2
+                continue
+            if token == "--models":
+                if index + 1 >= len(args):
+                    return CommandResult(
+                        output="Usage: /benchmark [--models a,b] [--pipeline <id>] [--verify] <instruction>",
+                        is_error=True,
+                    )
+                model_aliases = tuple(alias.strip() for alias in args[index + 1].split(",") if alias.strip())
+                index += 2
+                continue
+            break
+        instruction = " ".join(args[index:]).strip()
+        if not instruction:
+            return CommandResult(
+                output="Usage: /benchmark [--models a,b] [--pipeline <id>] [--verify] <instruction>",
+                is_error=True,
+            )
+        if not self.session.active_files:
+            return CommandResult(output="Benchmark requires active files. Use /add first.", is_error=True)
+        results = await self.multi_agent_runner.benchmark(
+            instruction=instruction,
+            active_files=tuple(self.session.active_files),
+            task_tag=self.session.task_tag,
+            model_aliases=model_aliases,
+            pipeline_hint=pipeline_hint,
+            verify_requested=verify_requested,
+        )
+        lines = [f"benchmark_models={len(results)}"]
+        for item in results:
+            status = "ok" if item.success else "failed"
+            lines.append(
+                f"{item.model_alias} | pipeline={item.pipeline_id} | status={status} | evaluation={item.evaluation_status} | review={item.review_status} | retries={item.retry_count} | edits={item.edit_count}"
+            )
+            if item.error:
+                lines.append(f"error[{item.model_alias}]={item.error}")
+        return CommandResult(output="\n".join(lines))
+
     async def _cmd_run(self, args: list[str]) -> CommandResult:
         if not args:
             return CommandResult(output="Usage: /run <command>", is_error=True)
@@ -265,6 +443,69 @@ class Orchestrator:
         if decision.action.value != "allow":
             return await self._request_approval_or_block("run", command, decision)
         return await self._execute_shell_command(command, decision, verify_after=verify_after)
+
+    async def _cmd_autoedit(self, args: list[str]) -> CommandResult:
+        if not args:
+            return CommandResult(output="Usage: /autoedit [--verify] <instruction>", is_error=True)
+        if not self.session.active_files:
+            return CommandResult(output="Autoedit requires active files. Use /add first.", is_error=True)
+        if self.approval_manager is None:
+            return CommandResult(output="Approval manager is not configured.", is_error=True)
+
+        verify_after = False
+        if args and args[0] == "--verify":
+            verify_after = True
+            args = args[1:]
+        if not args:
+            return CommandResult(output="Usage: /autoedit [--verify] <instruction>", is_error=True)
+
+        instruction = " ".join(args)
+        turn = new_turn_context(f"/autoedit {instruction}")
+        request = ChatRequest(
+            messages=(
+                ChatMessage(
+                    role="user",
+                    content=self._build_autoedit_prompt(instruction),
+                ),
+            ),
+            system_prompt=AUTOEDIT_SYSTEM_PROMPT,
+            task_tag=self.session.task_tag,
+            model_hint=self.runtime_state.manual_model_alias,
+            max_output_tokens=1200,
+            metadata={"mode": "autoedit"},
+        )
+        request = await self.context_composer.compose(request)
+        result = await self._invoke_request(f"autoedit: {instruction}", request, turn_id=turn.turn_id)
+        if result.is_error:
+            return result
+        raw_response = result.output or ""
+        try:
+            plan = self.edit_parser.parse(raw_response, allowed_paths=tuple(self.session.active_files))
+        except ValueError as exc:
+            message = f"Model edit plan is invalid: {exc}\nRaw response:\n{summarize_output(raw_response, max_chars=800).rendered}"
+            self._remember_failure("autoedit", instruction, message)
+            return CommandResult(output=message, is_error=True)
+
+        decision = PolicyDecision(
+            action=PolicyAction.REQUIRE_APPROVAL,
+            risk_level=RiskLevel.WORKSPACE_WRITE,
+            reason=f"Applying {len(plan.edits)} model-generated edit(s) mutates workspace files.",
+            safer_alternative="Inspect the proposed diff summary before approving the edit plan.",
+        )
+        approval = await self._request_approval_or_block(
+            "autoedit",
+            f"autoedit {instruction}",
+            decision,
+            metadata={
+                "verify_after": verify_after,
+                "edits": [
+                    {"path": item.path, "old": item.old, "new": item.new, "reason": item.reason}
+                    for item in plan.edits
+                ],
+            },
+        )
+        summary = self._render_edit_plan(plan)
+        return CommandResult(output=summary + "\n\n" + approval.output, is_error=approval.is_error)
 
     async def _cmd_replace(self, args: list[str]) -> CommandResult:
         if self.patch_service is None:
@@ -386,6 +627,28 @@ class Orchestrator:
                 verify_after=bool(approval.metadata.get("verify_after")),
                 approved=True,
             )
+        if approval.action == "autoedit":
+            raw_edits = approval.metadata.get("edits")
+            if not isinstance(raw_edits, list):
+                return CommandResult(output="Approval payload for autoedit is invalid.", is_error=True)
+            edits: list[EditOperation] = []
+            for item in raw_edits:
+                if not isinstance(item, dict):
+                    return CommandResult(output="Approval payload for autoedit is invalid.", is_error=True)
+                path = item.get("path")
+                old = item.get("old")
+                new = item.get("new")
+                reason = item.get("reason", "")
+                if not isinstance(path, str) or not isinstance(old, str) or not isinstance(new, str) or not isinstance(reason, str):
+                    return CommandResult(output="Approval payload for autoedit is invalid.", is_error=True)
+                edits.append(EditOperation(path=path, old=old, new=new, reason=reason))
+            return await self._apply_edit_plan(tuple(edits), verify_after=bool(approval.metadata.get("verify_after")), approved=True)
+        if approval.action == "delegate-apply":
+            try:
+                change_set = self._deserialize_change_set(approval.metadata)
+            except ValueError as exc:
+                return CommandResult(output=f"Approval payload for delegate apply is invalid: {exc}", is_error=True)
+            return await self._apply_delegate_change_set(change_set, approved=True)
         if approval.action == "verify":
             return await self._execute_verification(approval.command or None, approved=True)
         return CommandResult(output=f"Unsupported approval action: {approval.action}", is_error=True)
@@ -722,6 +985,87 @@ class Orchestrator:
         self._clear_failure()
         return CommandResult(output="\n".join(rendered))
 
+    async def _apply_edit_plan(
+        self,
+        edits: tuple[EditOperation, ...],
+        *,
+        verify_after: bool = False,
+        approved: bool = False,
+    ) -> CommandResult:
+        if self.patch_service is None:
+            return CommandResult(output="Patch service is not configured.", is_error=True)
+        rendered = [f"applied_edits={len(edits)}"]
+        applied: list[tuple[EditOperation, str | None]] = []
+        for edit in edits:
+            await self.event_bus.publish(
+                EventEnvelope.create(
+                    kind=EventKind.PATCH_PROPOSED,
+                    session_id=self.session.session_id,
+                    task_tag=self.session.task_tag,
+                    payload={"path": edit.path, "approved": approved, "mode": "autoedit", "reason": edit.reason},
+                )
+            )
+            try:
+                patch = self.patch_service.replace_text(edit.path, edit.old, edit.new)
+            except (FileNotFoundError, ValueError) as exc:
+                for applied_edit, backup_path in reversed(applied):
+                    self.patch_service.undo(applied_edit.path, backup_path)
+                if applied and self.file_change_audit is not None:
+                    self.file_change_audit.record_restore(
+                        session_id=self.session.session_id,
+                        paths=tuple(item.path for item, _ in applied),
+                        metadata={"source": "autoedit.partial-rollback"},
+                    )
+                cause = self._format_patch_failure(edit.path, exc)
+                message = f"Autoedit apply failed. {cause}"
+                if applied:
+                    message += f"\nRolled back {len(applied)} already applied edit(s)."
+                self._remember_failure("autoedit", edit.path, message)
+                return CommandResult(output=message, is_error=True)
+
+            await self.event_bus.publish(
+                EventEnvelope.create(
+                    kind=EventKind.PATCH_APPLIED,
+                    session_id=self.session.session_id,
+                    task_tag=self.session.task_tag,
+                    payload={
+                        "path": edit.path,
+                        "diff": patch.diff,
+                        "backup_path": patch.backup_path,
+                        "approved": approved,
+                        "mode": "autoedit",
+                        "reason": edit.reason,
+                    },
+                )
+            )
+            if self.file_change_audit is not None:
+                self.file_change_audit.record_patch(
+                    session_id=self.session.session_id,
+                    path=edit.path,
+                    diff=patch.diff,
+                    backup_path=patch.backup_path,
+                    metadata={"approved": approved, "mode": "autoedit", "reason": edit.reason},
+                )
+            self.session.recent_patches.append((edit.path, patch.backup_path))
+            applied.append((edit, patch.backup_path))
+            if edit.path not in self.session.active_files:
+                self.session.active_files.append(edit.path)
+                self.runtime_state.active_files = list(self.session.active_files)
+            diff_summary = summarize_output(patch.diff, max_chars=700).rendered
+            label = f"{edit.path}: {edit.reason}" if edit.reason else edit.path
+            rendered.append(label + "\n" + diff_summary)
+
+        self._remember_tool_output("autoedit plan", "\n\n".join(rendered))
+        if verify_after and self.verification_engine is not None:
+            verification = await self._execute_verification(None, approved=approved, return_only=True)
+            rendered.append("verification:\n" + verification.summary)
+            if not verification.passed:
+                self._remember_failure("verify", verification.checks_run[0] if verification.checks_run else "<default>", "\n".join(rendered))
+                return CommandResult(output="\n\n".join(rendered), is_error=True)
+
+        self._clear_failure()
+        return CommandResult(output="\n\n".join(rendered))
+
     async def _execute_verification(
         self,
         command: str | None,
@@ -764,6 +1108,100 @@ class Orchestrator:
             return verification
         return CommandResult(output=output, is_error=not verification.passed)
 
+    async def _apply_delegate_change_set(self, change_set: ChangeSet, *, approved: bool = False) -> CommandResult:
+        if self.patch_service is None:
+            return CommandResult(output="Patch service is not configured.", is_error=True)
+        await self.event_bus.publish(
+            EventEnvelope.create(
+                kind=EventKind.TOOL_CALLED,
+                session_id=self.session.session_id,
+                task_tag=self.session.task_tag,
+                payload={
+                    "command": "delegate-apply",
+                    "tool_kind": "merge",
+                    "paths": change_set.paths(),
+                    "approved": approved,
+                    "source_workspace": change_set.source_workspace,
+                },
+            )
+        )
+        try:
+            result = ChangeSetApplier(self.patch_service).apply(change_set)
+        except RuntimeError as exc:
+            self._remember_failure("delegate-apply", ", ".join(change_set.paths()), str(exc))
+            return CommandResult(output=str(exc), is_error=True)
+        if result.conflicts:
+            output = "Apply-back aborted due to conflicts in: " + ", ".join(result.conflicts)
+            self._remember_failure("delegate-apply", ", ".join(change_set.paths()), output)
+            await self.event_bus.publish(
+                EventEnvelope.create(
+                    kind=EventKind.TOOL_FINISHED,
+                    session_id=self.session.session_id,
+                    task_tag=self.session.task_tag,
+                    payload={
+                        "command": "delegate-apply",
+                        "tool_kind": "merge",
+                        "approved": approved,
+                        "conflicts": result.conflicts,
+                        "source_workspace": change_set.source_workspace,
+                    },
+                )
+            )
+            return CommandResult(output=output, is_error=True)
+
+        for application in result.applications:
+            await self.event_bus.publish(
+                EventEnvelope.create(
+                    kind=EventKind.PATCH_APPLIED,
+                    session_id=self.session.session_id,
+                    task_tag=self.session.task_tag,
+                    payload={
+                        "path": application.path,
+                        "diff": application.diff,
+                        "backup_path": application.backup_path,
+                        "approved": approved,
+                        "mode": "delegate-apply",
+                        "source_workspace": change_set.source_workspace,
+                    },
+                )
+            )
+            if self.file_change_audit is not None:
+                self.file_change_audit.record_patch(
+                    session_id=self.session.session_id,
+                    path=application.path,
+                    diff=application.diff,
+                    backup_path=application.backup_path,
+                    metadata={"approved": approved, "mode": "delegate-apply", "source_workspace": change_set.source_workspace},
+                )
+            self.session.recent_patches.append((application.path, application.backup_path))
+            if application.path not in self.session.active_files:
+                self.session.active_files.append(application.path)
+                self.runtime_state.active_files = list(self.session.active_files)
+        await self.event_bus.publish(
+            EventEnvelope.create(
+                kind=EventKind.TOOL_FINISHED,
+                session_id=self.session.session_id,
+                task_tag=self.session.task_tag,
+                payload={
+                    "command": "delegate-apply",
+                    "tool_kind": "merge",
+                    "approved": approved,
+                    "paths": result.applied_files,
+                    "source_workspace": change_set.source_workspace,
+                },
+            )
+        )
+        lines = [
+            f"applied_change_set={len(result.applied_files)}",
+            f"source_workspace={change_set.source_workspace}",
+            f"target_workspace={change_set.target_workspace}",
+            "diff:\n" + result.diff_summary,
+        ]
+        output = "\n".join(lines)
+        self._remember_tool_output("delegate apply", output)
+        self._clear_failure()
+        return CommandResult(output=output)
+
     def _remember_tool_output(self, title: str, text: str, *, limit: int = 1200, keep: int = 4) -> None:
         summary = summarize_output(text, max_chars=limit).rendered
         if not summary:
@@ -791,3 +1229,61 @@ class Orchestrator:
             if path == target:
                 return index
         return None
+
+    def _build_autoedit_prompt(self, instruction: str) -> str:
+        active_files = "\n".join(f"- {path}" for path in self.session.active_files)
+        return (
+            f"Task: {instruction}\n"
+            f"Active files allowed for editing:\n{active_files}\n\n"
+            "Return only a structured edit plan in JSON."
+        )
+
+    def _serialize_change_set(self, change_set: ChangeSet) -> dict[str, object]:
+        return {
+            "source_workspace": change_set.source_workspace,
+            "target_workspace": change_set.target_workspace,
+            "entries": [
+                {
+                    "path": entry.path,
+                    "before": entry.before,
+                    "after": entry.after,
+                    "diff": entry.diff,
+                }
+                for entry in change_set.entries
+            ],
+        }
+
+    def _deserialize_change_set(self, payload: dict[str, object]) -> ChangeSet:
+        source_workspace = payload.get("source_workspace")
+        target_workspace = payload.get("target_workspace")
+        raw_entries = payload.get("entries")
+        if not isinstance(source_workspace, str) or not isinstance(target_workspace, str) or not isinstance(raw_entries, list):
+            raise ValueError("missing source/target workspace or entries")
+        entries: list[ChangeSetEntry] = []
+        for item in raw_entries:
+            if not isinstance(item, dict):
+                raise ValueError("entries must be objects")
+            path = item.get("path")
+            before = item.get("before")
+            after = item.get("after")
+            diff = item.get("diff")
+            if not all(isinstance(value, str) for value in (path, before, after, diff)):
+                raise ValueError("change-set entry contains invalid fields")
+            entries.append(ChangeSetEntry(path=path, before=before, after=after, diff=diff))
+        return ChangeSet(source_workspace=source_workspace, target_workspace=target_workspace, entries=tuple(entries))
+
+    def _render_edit_plan(self, plan: EditPlan) -> str:
+        lines = [f"planned_edits={len(plan.edits)}"]
+        for item in plan.edits:
+            reason = f" ({item.reason})" if item.reason else ""
+            lines.append(f"- {item.path}{reason}")
+        return "\n".join(lines)
+
+    def _format_patch_failure(self, path: str, exc: Exception) -> str:
+        if isinstance(exc, FileNotFoundError):
+            return f"File not found: {path}"
+        if str(exc) == "needle_not_found":
+            return f"Exact match not found in {path}."
+        if str(exc) == "needle_ambiguous":
+            return f"Edit is ambiguous in {path}; model selected a non-unique snippet."
+        return f"Patch application failed for {path}: {exc}"

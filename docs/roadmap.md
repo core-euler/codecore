@@ -1,6 +1,6 @@
 # CodeCore Roadmap
 ## Живой roadmap проекта с текущим статусом, этапами и критериями готовности
-`updated: 2026-03-23 (phase 5 in progress, mutation loop added)`
+`updated: 2026-03-23 (phase 6 feature set implemented, hardening remains)`
 
 ---
 
@@ -59,9 +59,14 @@
 - [x] Есть `Phase 5` baseline: `/run`, policy-gated shell execution, summary-first tool outputs
 - [x] Есть `git-backed` `/diff` и baseline `/undo`
 - [x] Есть approval-backed `/replace` для точечных file edits
+- [x] Есть model-driven `/autoedit` для structured edit plans
 - [x] Есть snapshot-backed `/rollback`, не зависящий от `git HEAD`
 - [x] Есть `/retry` для повторного запуска последней упавшей проверки
 - [x] Есть append-only audit trace для CodeCore-managed file changes
+- [x] Есть `Phase 6` foundation: agents package, pipeline registry, `/delegate`, isolated worktree baseline
+- [x] Есть reviewer-isolated pipeline path и approval-backed apply-back через `change sets`
+- [x] Есть `coder -> test -> retry -> review` loop для isolated multi-agent pipelines
+- [x] Есть baseline benchmark mode: один task -> несколько model aliases
 
 ### Чего пока нет
 
@@ -78,7 +83,8 @@
 - `Phase 2` завершена: runnable MVP kernel работает
 - `Phase 3` завершена: context + skills foundation работает end-to-end
 - `Phase 4` завершена: memory + analytics layer работает end-to-end
-- `Phase 5` в работе: безопасный execution baseline и mutation loop подняты
+- `Phase 5` завершена: execution + automation loop работает end-to-end
+- `Phase 6` почти завершена: feature set реализован, осталось доказать quality gain и закрыть hardening
 
 ---
 
@@ -89,7 +95,7 @@
 - [x] `Phase 2` — Runnable MVP Kernel (`v0.1`)
 - [x] `Phase 3` — Context + Skills (`v0.2`)
 - [x] `Phase 4` — Memory + Analytics (`v0.3`)
-- [ ] `Phase 5` — Execution + Automation (`v0.4`)
+- [x] `Phase 5` — Execution + Automation (`v0.4`)
 - [ ] `Phase 6` — Multi-Agent + Worktrees (`v0.5`)
 - [ ] `Phase 7` — Benchmark, Hardening, Release (`v1.0`)
 
@@ -373,6 +379,7 @@
 ### Commands and workflows
 
 - [x] `/run <cmd>`
+- [x] `/autoedit <instruction>`
 - [x] `/replace <path> <old> <new>`
 - [x] `/rollback`
 - [x] `/retry`
@@ -391,9 +398,9 @@
 
 ### Критерий завершения `v0.4`
 
-- [ ] CodeCore может выполнить задачу от промпта до патча и проверки
+- [x] CodeCore может выполнить задачу от промпта до патча и проверки
 - [x] Есть безопасный цикл исправления ошибок
-- [ ] Инструмент не теряет управляемость при реальном file editing
+- [x] Инструмент не теряет управляемость при реальном file editing
 
 ---
 
@@ -405,29 +412,29 @@
 
 ### Multi-Agent Layer
 
-- [ ] Реализовать `agents/classifier.py`
-- [ ] Реализовать `agents/planner.py`
-- [ ] Реализовать `agents/coder.py`
-- [ ] Реализовать `agents/reviewer.py`
-- [ ] Реализовать `agents/evaluator.py`
-- [ ] Реализовать `agents/synthesizer.py`
-- [ ] Реализовать pipeline definitions
-- [ ] Реализовать role-based routing
+- [x] Реализовать `agents/classifier.py`
+- [x] Реализовать `agents/planner.py`
+- [x] Реализовать `agents/coder.py`
+- [x] Реализовать `agents/reviewer.py`
+- [x] Реализовать `agents/evaluator.py`
+- [x] Реализовать `agents/synthesizer.py`
+- [x] Реализовать pipeline definitions
+- [x] Реализовать role-based routing
 
 ### Parallel Execution
 
-- [ ] Поддержка isolated execution contexts
-- [ ] Поддержка git worktrees
-- [ ] Отдельный context snapshot на агента
-- [ ] Merge discipline по change sets
-- [ ] Reviewer как отдельный execution role
+- [x] Поддержка isolated execution contexts
+- [x] Поддержка git worktrees
+- [x] Отдельный context snapshot на агента
+- [x] Merge discipline по change sets
+- [x] Reviewer как отдельный execution role
 
 ### Pipelines
 
-- [ ] `planner -> coder`
-- [ ] `planner -> coder -> reviewer`
-- [ ] `coder -> test -> retry -> review`
-- [ ] Benchmark mode: один запрос -> N моделей
+- [x] `planner -> coder`
+- [x] `planner -> coder -> reviewer`
+- [x] `coder -> test -> retry -> review`
+- [x] Benchmark mode: один запрос -> N моделей
 
 ### Критерий завершения `v0.5`
 
@@ -545,24 +552,20 @@
 
 ### Следующий обязательный этап
 
-- [ ] Продолжить `Phase 5` и довести execution baseline до autonomous patch/apply/verify loop
+- [ ] Закрыть `Phase 6` через benchmark evidence, hardening и quality proof loops
 
 ### Конкретный ближайший срез
 
-- [x] `execution/tests.py`
-- [x] `execution/approvals.py`
-- [x] `execution/sandbox.py`
-- [x] tool-output -> context injection
-- [x] `/replace`
-- [x] `/rollback`
-- [x] `/retry`
-- [x] file-change audit log
-- [x] audit trace for file changes
+- [x] `agents/classifier.py`
+- [x] `agents/planner.py`
+- [x] `agents/coder.py`
+- [x] pipeline definitions
+- [x] isolated execution contexts
+- [x] git worktrees baseline
 
 ### После этого
 
-- [ ] autotest/error-loop
-- [x] approval UX
+- [ ] зафиксировать benchmark evidence и quality deltas
 
 ---
 

@@ -18,6 +18,10 @@ class PatchService:
     def __init__(self, workspace_files: WorkspaceFiles) -> None:
         self._workspace_files = workspace_files
 
+    @property
+    def workspace_files(self) -> WorkspaceFiles:
+        return self._workspace_files
+
     def preview_replace(self, relative: str, new_content: str) -> str:
         old_content = self._workspace_files.read_text(relative) or ""
         return self._workspace_files.diff_text(relative, old_content, new_content)

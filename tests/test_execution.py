@@ -17,7 +17,7 @@ from codecore.context.composer import DefaultContextComposer
 from codecore.context.manager import ContextManager
 from codecore.domain.enums import EventKind, PolicyAction, RiskLevel, TaskTag
 from codecore.domain.events import EventEnvelope
-from codecore.domain.models import ChatMessage, ChatRequest
+from codecore.domain.models import ChatMessage, ChatRequest, ChatResult
 from codecore.execution.audit import FileChangeAudit
 from codecore.execution.approvals import ApprovalManager
 from codecore.execution.files import WorkspaceFiles
@@ -37,6 +37,7 @@ from codecore.providers.adapters.base import AdapterFactory
 from codecore.providers.broker import PolicyDrivenBroker
 from codecore.providers.health import ProviderHealthService
 from codecore.providers.registry import ProviderRegistry
+from codecore.providers.capabilities import route_capabilities
 
 
 class RecordingSink:
@@ -45,6 +46,35 @@ class RecordingSink:
 
     async def publish(self, event: EventEnvelope) -> None:
         self.events.append(event)
+
+
+class ScriptedAdapter:
+    def __init__(self, route, response_text: str) -> None:
+        self._route = route
+        self._response_text = response_text
+
+    async def chat(self, request):
+        return ChatResult(text=self._response_text, latency_ms=5, metadata={"scripted": True})
+
+    async def stream(self, request):
+        yield self._response_text
+
+    async def health(self):
+        from codecore.domain.enums import HealthState
+        from codecore.domain.models import HealthStatus
+
+        return HealthStatus(state=HealthState.HEALTHY, checked_at=HealthStatus.unknown().checked_at, detail="ok")
+
+    def capabilities(self):
+        return route_capabilities(self._route)
+
+
+class ScriptedAdapterFactory:
+    def __init__(self, response_text: str) -> None:
+        self._response_text = response_text
+
+    def create(self, route):
+        return ScriptedAdapter(route, self._response_text)
 
 
 class ExecutionRuntimeTest(unittest.TestCase):
@@ -514,6 +544,125 @@ class ExecutionRuntimeTest(unittest.TestCase):
             output = asyncio.run(run())
             self.assertIn("Rolled back patch: notes.txt", output)
             self.assertEqual((temp_path / "notes.txt").read_text(encoding="utf-8"), "before\n")
+
+    def test_autoedit_generates_plan_and_applies_after_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            (temp_path / "notes.txt").write_text("before\n", encoding="utf-8")
+            registry = ProviderRegistry(load_provider_registry(ROOT / "providers" / "registry.yaml"))
+            adapter_factory = ScriptedAdapterFactory(
+                json.dumps(
+                    {
+                        "edits": [
+                            {
+                                "path": "notes.txt",
+                                "old": "before",
+                                "new": "after",
+                                "reason": "apply requested rename",
+                            }
+                        ]
+                    }
+                )
+            )
+            health = ProviderHealthService(registry, adapter_factory)
+            session = new_session_runtime()
+            runtime_state = RuntimeState.default()
+            context_manager = ContextManager(temp_path)
+            approvals = ApprovalManager()
+            orchestrator = Orchestrator(
+                session=session,
+                runtime_state=runtime_state,
+                provider_registry=registry,
+                broker=PolicyDrivenBroker(registry, health),
+                health_service=health,
+                adapter_factory=adapter_factory,
+                context_manager=context_manager,
+                context_composer=DefaultContextComposer(
+                    context_manager,
+                    session,
+                    runtime_state,
+                    ProjectManifest(project_id="temp-autoedit"),
+                ),
+                event_bus=EventBus(sinks=[]),
+                patch_service=PatchService(WorkspaceFiles(temp_path, temp_path / ".artifacts")),
+                approval_manager=approvals,
+            )
+
+            async def run() -> tuple[str, str]:
+                await orchestrator.handle_line("/add notes.txt")
+                planned = await orchestrator.handle_line('/autoedit "change before to after"')
+                approval_id = planned.output.split("Approval required: ", 1)[1].splitlines()[0]
+                approved = await orchestrator.handle_line(f"/approve {approval_id}")
+                return planned.output or "", approved.output or ""
+
+            planned_output, approved_output = asyncio.run(run())
+            self.assertIn("planned_edits=1", planned_output)
+            self.assertIn("notes.txt (apply requested rename)", planned_output)
+            self.assertIn("applied_edits=1", approved_output)
+            self.assertEqual((temp_path / "notes.txt").read_text(encoding="utf-8"), "after\n")
+
+    def test_autoedit_rolls_back_partial_batch_on_apply_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            (temp_path / "one.txt").write_text("alpha\n", encoding="utf-8")
+            (temp_path / "two.txt").write_text("beta\n", encoding="utf-8")
+            registry = ProviderRegistry(load_provider_registry(ROOT / "providers" / "registry.yaml"))
+            adapter_factory = ScriptedAdapterFactory(
+                json.dumps(
+                    {
+                        "edits": [
+                            {
+                                "path": "one.txt",
+                                "old": "alpha",
+                                "new": "gamma",
+                                "reason": "first edit",
+                            },
+                            {
+                                "path": "two.txt",
+                                "old": "missing",
+                                "new": "delta",
+                                "reason": "second edit fails",
+                            },
+                        ]
+                    }
+                )
+            )
+            health = ProviderHealthService(registry, adapter_factory)
+            session = new_session_runtime()
+            runtime_state = RuntimeState.default()
+            context_manager = ContextManager(temp_path)
+            approvals = ApprovalManager()
+            orchestrator = Orchestrator(
+                session=session,
+                runtime_state=runtime_state,
+                provider_registry=registry,
+                broker=PolicyDrivenBroker(registry, health),
+                health_service=health,
+                adapter_factory=adapter_factory,
+                context_manager=context_manager,
+                context_composer=DefaultContextComposer(
+                    context_manager,
+                    session,
+                    runtime_state,
+                    ProjectManifest(project_id="temp-autoedit-rollback"),
+                ),
+                event_bus=EventBus(sinks=[]),
+                patch_service=PatchService(WorkspaceFiles(temp_path, temp_path / ".artifacts")),
+                approval_manager=approvals,
+            )
+
+            async def run() -> str:
+                await orchestrator.handle_line("/add one.txt two.txt")
+                planned = await orchestrator.handle_line('/autoedit "apply batch changes"')
+                approval_id = planned.output.split("Approval required: ", 1)[1].splitlines()[0]
+                approved = await orchestrator.handle_line(f"/approve {approval_id}")
+                self.assertTrue(approved.is_error)
+                return approved.output or ""
+
+            output = asyncio.run(run())
+            self.assertIn("Rolled back 1 already applied edit(s).", output)
+            self.assertEqual((temp_path / "one.txt").read_text(encoding="utf-8"), "alpha\n")
+            self.assertEqual((temp_path / "two.txt").read_text(encoding="utf-8"), "beta\n")
 
     def test_orchestrator_diff_and_undo_commands(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

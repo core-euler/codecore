@@ -5,6 +5,13 @@ HELP_TEXT = """Available commands:
   /status            Show current runtime status
   /stats             Show telemetry and memory analytics
   /run [--verify] <command> Run a shell command through policy/approval gates
+  /delegate [--pipeline <id>] [--verify] [--apply] <instruction>
+                    Run a multi-agent pipeline and optionally request apply-back to the main workspace
+  /benchmark [--models a,b] [--pipeline <id>] [--verify] <instruction>
+                    Run the same multi-agent task against multiple model aliases and compare outcomes
+  /pipelines         Show known agent pipelines and the active selection
+  /autoedit [--verify] <instruction>
+                    Ask the active model for structured edits on active files
   /replace [--verify] <path> <old> <new>
                     Replace one exact text match in a workspace file
   /rollback [path|latest]
