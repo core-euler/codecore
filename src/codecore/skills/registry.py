@@ -29,3 +29,6 @@ class LocalSkillRegistry:
 
     def has_skill(self, skill_id: str) -> bool:
         return skill_id in self._skills
+
+    def skill_ids(self) -> tuple[str, ...]:
+        return tuple(sorted(self._skills))
