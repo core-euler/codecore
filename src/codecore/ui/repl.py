@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,11 +13,11 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.shortcuts import radiolist_dialog
 from prompt_toolkit.shortcuts.prompt import CompleteStyle
 from rich.align import Align
 from rich.console import Console
 from rich.markdown import Markdown
-from rich.panel import Panel
 from rich.text import Text
 
 from ..domain.enums import TaskTag
@@ -227,11 +228,15 @@ class SlashCommandCompleter(Completer):
         return non_flag_index == 0
 
 
+ModalSelector = Callable[[str, str, tuple[tuple[str, str], ...]], Awaitable[str | None]]
+
+
 @dataclass(slots=True)
 class Repl:
     orchestrator: Orchestrator
     console: Console
     history_path: str | None = None
+    modal_selector: ModalSelector | None = None
 
     async def run(self) -> int:
         await self.orchestrator.start()
@@ -280,8 +285,9 @@ class Repl:
                 result = await self.orchestrator.handle_line(line)
             if result.output:
                 self._render_output(result)
-            self._render_quick_actions()
             if result.should_exit:
+                return 0
+            if await self._resolve_interaction_gate():
                 return 0
 
     async def _run_stream(self) -> int:
@@ -297,14 +303,7 @@ class Repl:
 
     def _render_output(self, result) -> None:
         if result.render_mode == "markdown" and not result.is_error:
-            panel = Panel(
-                Markdown(result.output),
-                title="CodeCore",
-                border_style="cyan",
-                expand=False,
-                padding=(0, 1),
-            )
-            self.console.print(Align.left(panel))
+            self.console.print(Markdown(result.output))
             self.console.print()
             return
         self.console.print(result.output, style="red" if result.is_error else None, markup=False, highlight=False)
@@ -314,22 +313,88 @@ class Repl:
         stripped = line.strip()
         if not stripped or stripped.startswith("/"):
             return
-        panel = Panel(
-            Text(stripped),
-            title="You",
-            border_style="bright_blue",
-            style="on rgb(24,33,55)",
-            expand=False,
-            padding=(0, 1),
-        )
-        self.console.print(Align.right(panel))
+        self.console.print(Align.right(Text(stripped, style="on rgb(24,33,55)")))
         self.console.print()
 
-    def _render_quick_actions(self) -> None:
+    async def _resolve_interaction_gate(self) -> bool:
+        while True:
+            approval_state = await self._handle_pending_approval()
+            if approval_state is True:
+                return True
+            if approval_state is False:
+                continue
+            follow_up_state = await self._handle_follow_up_action()
+            if follow_up_state is True:
+                return True
+            if follow_up_state is False:
+                continue
+            return False
+
+    async def _handle_follow_up_action(self) -> bool | None:
         if self.orchestrator.session.pending_follow_up_action != "apply_last_prompt":
-            return
-        self.console.print("Quick actions: [1] apply changes  [ /apply ]", style="yellow")
-        self.console.print()
+            return None
+        choice = await self._select_modal(
+            title="Action Required",
+            text="CodeCore is ready to apply the planned changes.",
+            options=(
+                ("apply", "Apply changes"),
+                ("continue", "Keep editing"),
+            ),
+        )
+        if choice == "apply":
+            with self.console.status("planning edits", spinner="dots"):
+                result = await self.orchestrator.handle_line("/apply")
+            if result.output:
+                self._render_output(result)
+            return result.should_exit
+        self.orchestrator.session.pending_follow_up_action = None
+        return False
+
+    async def _handle_pending_approval(self) -> bool | None:
+        manager = self.orchestrator.approval_manager
+        if manager is None:
+            return None
+        pending = manager.latest()
+        if pending is None:
+            return None
+        text = (
+            f"Action: {pending.action}\n"
+            f"Risk: {pending.risk_level.value}\n"
+            f"Reason: {pending.reason}\n"
+            f"Command: {pending.command}"
+        )
+        if pending.safer_alternative:
+            text += f"\nSafer alternative: {pending.safer_alternative}"
+        choice = await self._select_modal(
+            title="Approval Required",
+            text=text,
+            options=(
+                ("approve_once", "Allow once"),
+                ("approve_type", "Allow this type for session"),
+                ("dismiss", "Dismiss"),
+            ),
+        )
+        command = {
+            "approve_once": "/approve latest",
+            "approve_type": "/approve 2",
+            "dismiss": "/dismiss latest",
+        }.get(choice)
+        if command is None:
+            return False
+        with self.console.status("applying choice", spinner="dots"):
+            result = await self.orchestrator.handle_line(command)
+        if result.output:
+            self._render_output(result)
+        return result.should_exit
+
+    async def _select_modal(self, *, title: str, text: str, options: tuple[tuple[str, str], ...]) -> str | None:
+        if self.modal_selector is not None:
+            return await self.modal_selector(title, text, options)
+        while True:
+            dialog = radiolist_dialog(title=title, text=text, values=list(options))
+            result = await dialog.run_async()
+            if result is not None:
+                return result
 
     @staticmethod
     def _status_text_for(line: str) -> str:
