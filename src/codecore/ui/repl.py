@@ -7,8 +7,10 @@ import sys
 from dataclasses import dataclass
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.shortcuts.prompt import CompleteStyle
 from rich.align import Align
 from rich.console import Console
 from rich.markdown import Markdown
@@ -16,7 +18,29 @@ from rich.panel import Panel
 from rich.text import Text
 
 from ..kernel.orchestrator import Orchestrator
+from .commands import COMMAND_SPECS
 from .statusbar import build_status_line
+
+
+class SlashCommandCompleter(Completer):
+    def get_completions(self, document, complete_event):
+        text_before_cursor = document.text_before_cursor
+        lines = text_before_cursor.splitlines() or [""]
+        current_line = lines[-1].lstrip()
+        if not current_line.startswith("/"):
+            return
+        if " " in current_line:
+            return
+        typed = current_line[1:]
+        for spec in COMMAND_SPECS:
+            if typed and not spec.name.startswith(typed):
+                continue
+            yield Completion(
+                text=spec.name,
+                start_position=-len(typed),
+                display=f"/{spec.name}",
+                display_meta=spec.description,
+            )
 
 
 @dataclass(slots=True)
@@ -46,7 +70,15 @@ class Repl:
         def _submit(event) -> None:
             event.current_buffer.validate_and_handle()
 
-        prompt = PromptSession(history=history, multiline=True, key_bindings=key_bindings)
+        prompt = PromptSession(
+            history=history,
+            multiline=True,
+            key_bindings=key_bindings,
+            completer=SlashCommandCompleter(),
+            complete_while_typing=True,
+            complete_style=CompleteStyle.MULTI_COLUMN,
+            reserve_space_for_menu=8,
+        )
         while True:
             self.console.print()
             self.console.print(build_status_line(self.orchestrator.session, self.orchestrator.runtime_state), style="dim")
