@@ -302,6 +302,8 @@ class ExecutionRuntimeTest(unittest.TestCase):
             output = asyncio.run(run())
             self.assertIn("текущий сценарий", output.lower())
             self.assertIn("docs/SPEC.md", session.active_files)
+            self.assertGreater(session.last_context_file_count, 0)
+            self.assertGreater(session.last_context_token_count, 0)
             self.assertEqual(adapter_factory.calls, 2)
 
     def test_prompt_tool_loop_searches_then_answers(self) -> None:

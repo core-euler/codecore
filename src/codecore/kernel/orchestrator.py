@@ -1464,19 +1464,14 @@ class Orchestrator:
             self.session.recent_tool_outputs[:] = self.session.recent_tool_outputs[-keep:]
 
     def _update_context_metrics(self, request: ChatRequest) -> None:
-        reports = request.metadata.get("selected_context_reports", [])
-        if not isinstance(reports, list):
+        file_count = request.metadata.get("context_display_file_count")
+        total_tokens = request.metadata.get("context_total_tokens")
+        if not isinstance(file_count, int) or not isinstance(total_tokens, int):
             self.session.last_context_file_count = 0
             self.session.last_context_token_count = 0
             return
-        token_count = 0
-        for item in reports:
-            if isinstance(item, dict):
-                value = item.get("selected_tokens")
-                if isinstance(value, int):
-                    token_count += value
-        self.session.last_context_file_count = len(reports)
-        self.session.last_context_token_count = token_count
+        self.session.last_context_file_count = max(0, file_count)
+        self.session.last_context_token_count = max(0, total_tokens)
 
     def _is_action_type_allowed(self, action: str) -> bool:
         return action in self.session.allowed_action_types

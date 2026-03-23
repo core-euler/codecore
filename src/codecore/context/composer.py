@@ -16,7 +16,7 @@ from ..governance.security import guard_untrusted_content
 from .manager import ContextManager
 from .repo_map import RepoMapBuilder
 from .selectors import ContextSelection, ContextSelector
-from .token_budget import TokenBudgetPlanner
+from .token_budget import TokenBudgetPlanner, estimate_text_tokens
 
 BASE_SYSTEM_PROMPT = (
     "You are CodeCore, a provider-agnostic software development agent. "
@@ -85,9 +85,11 @@ class DefaultContextComposer(ContextComposer):
         self._session.active_skills = [skill.skill_id for skill in selected_skills]
 
         tool_block = ""
+        tool_block_tokens = 0
         if self._session.recent_tool_outputs:
             tool_budget = max(0, min(1024, base_budget.available_context_tokens // 4))
             tool_block = self._render_tool_context(tool_budget)
+            tool_block_tokens = estimate_text_tokens(tool_block) if tool_block else 0
 
         memory_budget_plan = self._budget_planner.plan(
             BASE_SYSTEM_PROMPT,
@@ -99,6 +101,7 @@ class DefaultContextComposer(ContextComposer):
         )
 
         memory_block = ""
+        memory_block_tokens = 0
         recalled_memories = ()
         if self._memory_recall_composer is not None and memory_budget_plan.available_context_tokens >= 128:
             memory_budget = max(0, min(1024, memory_budget_plan.available_context_tokens // 4))
@@ -120,6 +123,7 @@ class DefaultContextComposer(ContextComposer):
                 active_skills=tuple(self._session.active_skills),
                 active_files=tuple(self._session.active_files),
             )
+            memory_block_tokens = estimate_text_tokens(memory_block) if memory_block else 0
 
         context_budget = self._budget_planner.plan(
             BASE_SYSTEM_PROMPT,
@@ -140,8 +144,20 @@ class DefaultContextComposer(ContextComposer):
         file_context = self._context_selector.render(file_selection.chunks)
 
         repo_map_text = ""
+        repo_map_tokens = 0
         if not self._session.active_files and file_selection.remaining_tokens >= 128:
             repo_map_text = self._repo_map_builder.build_for_budget(min(512, file_selection.remaining_tokens))
+            repo_map_tokens = estimate_text_tokens(repo_map_text) if repo_map_text else 0
+
+        skill_block_tokens = estimate_text_tokens(skill_block) if skill_block else 0
+        display_file_count = len(active_file_stats)
+        context_total_tokens = (
+            file_selection.total_tokens
+            + tool_block_tokens
+            + memory_block_tokens
+            + repo_map_tokens
+            + skill_block_tokens
+        )
 
         parts = [BASE_SYSTEM_PROMPT]
         if request.system_prompt:
@@ -184,6 +200,12 @@ class DefaultContextComposer(ContextComposer):
                 ],
                 "selected_context_chunks": len(file_selection.chunks),
                 "selected_context_total_tokens": file_selection.total_tokens,
+                "tool_context_tokens": tool_block_tokens,
+                "memory_block_tokens": memory_block_tokens,
+                "repo_map_tokens": repo_map_tokens,
+                "skill_block_tokens": skill_block_tokens,
+                "context_display_file_count": display_file_count,
+                "context_total_tokens": context_total_tokens,
                 "recalled_memories": [
                     {
                         "memory_id": item.memory_id,
