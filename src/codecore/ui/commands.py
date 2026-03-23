@@ -5,6 +5,7 @@ HELP_TEXT = """Available commands:
   /status            Show current runtime status
   /stats             Show telemetry and memory analytics
   /run [--verify] <command> Run a shell command through policy/approval gates
+  /apply             Turn the last user request into a structured code edit on active files
   /delegate [--pipeline <id>] [--verify] [--apply] <instruction>
                     Run a multi-agent pipeline and optionally request apply-back to the main workspace
   /benchmark [--models a,b] [--pipeline <id>] [--verify] <instruction>
@@ -40,4 +41,5 @@ HELP_TEXT = """Available commands:
 Input:
   Enter submits the prompt
   Ctrl+J inserts a newline
+  If CodeCore offers to start implementation, press `1` or use `/apply`
 """

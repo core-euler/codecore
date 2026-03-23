@@ -362,6 +362,130 @@ class ExecutionRuntimeTest(unittest.TestCase):
             self.assertIn("bot/states.py", output)
             self.assertEqual(adapter_factory.calls, 2)
 
+    def test_apply_shortcut_uses_last_user_request(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            (temp_path / "notes.txt").write_text("before\n", encoding="utf-8")
+            registry = ProviderRegistry(load_provider_registry(ROOT / ".codecore" / "providers" / "registry.yaml"))
+            adapter_factory = ScriptedSequenceAdapterFactory(
+                [
+                    json.dumps(
+                        {
+                            "action": "answer",
+                            "answer": "Нужно ли мне начать реализацию этих изменений в коде?",
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "edits": [
+                                {
+                                    "path": "notes.txt",
+                                    "old": "before",
+                                    "new": "after",
+                                    "reason": "apply shortcut",
+                                }
+                            ]
+                        }
+                    ),
+                ]
+            )
+            health = ProviderHealthService(registry, adapter_factory)
+            session = new_session_runtime()
+            runtime_state = RuntimeState.default()
+            context_manager = ContextManager(temp_path)
+            approvals = ApprovalManager()
+            orchestrator = Orchestrator(
+                session=session,
+                runtime_state=runtime_state,
+                provider_registry=registry,
+                broker=PolicyDrivenBroker(registry, health),
+                health_service=health,
+                adapter_factory=adapter_factory,
+                context_manager=context_manager,
+                context_composer=DefaultContextComposer(
+                    context_manager,
+                    session,
+                    runtime_state,
+                    ProjectManifest(project_id="temp-apply-shortcut"),
+                ),
+                event_bus=EventBus(sinks=[]),
+                native_tool_executor=NativeRepositoryTools(context_manager),
+                patch_service=PatchService(WorkspaceFiles(temp_path, temp_path / ".artifacts")),
+                approval_manager=approvals,
+            )
+
+            async def run() -> tuple[str, str]:
+                await orchestrator.handle_line("/add notes.txt")
+                first = await orchestrator.handle_line("Измени before на after")
+                applied = await orchestrator.handle_line("/apply")
+                return first.output or "", applied.output or ""
+
+            first_output, applied_output = asyncio.run(run())
+            self.assertIn("начать реализацию", first_output.lower())
+            self.assertIn("planned_edits=1", applied_output)
+
+    def test_affirmative_reply_triggers_apply_shortcut(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            (temp_path / "notes.txt").write_text("before\n", encoding="utf-8")
+            registry = ProviderRegistry(load_provider_registry(ROOT / ".codecore" / "providers" / "registry.yaml"))
+            adapter_factory = ScriptedSequenceAdapterFactory(
+                [
+                    json.dumps(
+                        {
+                            "action": "answer",
+                            "answer": "Нужно ли мне начать реализацию этих изменений в коде?",
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "edits": [
+                                {
+                                    "path": "notes.txt",
+                                    "old": "before",
+                                    "new": "after",
+                                    "reason": "affirmative shortcut",
+                                }
+                            ]
+                        }
+                    ),
+                ]
+            )
+            health = ProviderHealthService(registry, adapter_factory)
+            session = new_session_runtime()
+            runtime_state = RuntimeState.default()
+            context_manager = ContextManager(temp_path)
+            approvals = ApprovalManager()
+            orchestrator = Orchestrator(
+                session=session,
+                runtime_state=runtime_state,
+                provider_registry=registry,
+                broker=PolicyDrivenBroker(registry, health),
+                health_service=health,
+                adapter_factory=adapter_factory,
+                context_manager=context_manager,
+                context_composer=DefaultContextComposer(
+                    context_manager,
+                    session,
+                    runtime_state,
+                    ProjectManifest(project_id="temp-apply-affirmative"),
+                ),
+                event_bus=EventBus(sinks=[]),
+                native_tool_executor=NativeRepositoryTools(context_manager),
+                patch_service=PatchService(WorkspaceFiles(temp_path, temp_path / ".artifacts")),
+                approval_manager=approvals,
+            )
+
+            async def run() -> tuple[str, str]:
+                await orchestrator.handle_line("/add notes.txt")
+                first = await orchestrator.handle_line("Измени before на after")
+                applied = await orchestrator.handle_line("Да применяй изменения")
+                return first.output or "", applied.output or ""
+
+            first_output, applied_output = asyncio.run(run())
+            self.assertIn("начать реализацию", first_output.lower())
+            self.assertIn("planned_edits=1", applied_output)
+
     def test_verify_command_runs_explicit_unittest(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

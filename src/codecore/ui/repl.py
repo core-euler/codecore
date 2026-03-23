@@ -9,8 +9,11 @@ from dataclasses import dataclass
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
+from rich.align import Align
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.text import Text
 
 from ..kernel.orchestrator import Orchestrator
 from .statusbar import build_status_line
@@ -45,7 +48,9 @@ class Repl:
 
         prompt = PromptSession(history=history, multiline=True, key_bindings=key_bindings)
         while True:
+            self.console.print()
             self.console.print(build_status_line(self.orchestrator.session, self.orchestrator.runtime_state), style="dim")
+            self.console.print()
             try:
                 line = await prompt.prompt_async("> ")
             except KeyboardInterrupt:
@@ -54,10 +59,12 @@ class Repl:
             except EOFError:
                 self.console.print()
                 return 0
+            self._render_user_input(line)
             with self.console.status(self._status_text_for(line), spinner="dots"):
                 result = await self.orchestrator.handle_line(line)
             if result.output:
                 self._render_output(result)
+            self._render_quick_actions()
             if result.should_exit:
                 return 0
 
@@ -74,9 +81,39 @@ class Repl:
 
     def _render_output(self, result) -> None:
         if result.render_mode == "markdown" and not result.is_error:
-            self.console.print(Markdown(result.output))
+            panel = Panel(
+                Markdown(result.output),
+                title="CodeCore",
+                border_style="cyan",
+                expand=False,
+                padding=(0, 1),
+            )
+            self.console.print(Align.left(panel))
+            self.console.print()
             return
         self.console.print(result.output, style="red" if result.is_error else None, markup=False, highlight=False)
+        self.console.print()
+
+    def _render_user_input(self, line: str) -> None:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("/"):
+            return
+        panel = Panel(
+            Text(stripped),
+            title="You",
+            border_style="bright_blue",
+            style="on rgb(24,33,55)",
+            expand=False,
+            padding=(0, 1),
+        )
+        self.console.print(Align.right(panel))
+        self.console.print()
+
+    def _render_quick_actions(self) -> None:
+        if self.orchestrator.session.pending_follow_up_action != "apply_last_prompt":
+            return
+        self.console.print("Quick actions: [1] apply changes  [ /apply ]", style="yellow")
+        self.console.print()
 
     @staticmethod
     def _status_text_for(line: str) -> str:

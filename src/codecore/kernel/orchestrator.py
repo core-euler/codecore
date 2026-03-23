@@ -81,6 +81,10 @@ _TOOL_LOOP_HINT_RE = re.compile(
     r"\b(?:файл|файлы|код|репозитор|сценар|сообщен|обработчик|состояни|найди|прочитай|посмотри|где)\b)",
     re.IGNORECASE,
 )
+_FOLLOW_UP_CONFIRM_RE = re.compile(
+    r"^(?:1|да|ага|угу|ок|окей|yes|yep|yeah|go|делай|применяй|запускай|начинай|погнали)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(slots=True)
@@ -117,6 +121,7 @@ class Orchestrator:
         self.command_router.register("delegate", self._cmd_delegate)
         self.command_router.register("benchmark", self._cmd_benchmark)
         self.command_router.register("run", self._cmd_run)
+        self.command_router.register("apply", self._cmd_apply)
         self.command_router.register("autoedit", self._cmd_autoedit)
         self.command_router.register("replace", self._cmd_replace)
         self.command_router.register("rollback", self._cmd_rollback)
@@ -165,12 +170,16 @@ class Orchestrator:
         stripped = line.strip()
         if not stripped:
             return CommandResult()
+        if self.session.pending_follow_up_action == "apply_last_prompt" and self._is_apply_follow_up(stripped):
+            return await self._cmd_apply([])
         if stripped.startswith("/"):
             return await self.command_router.dispatch(stripped)
         return await self._handle_prompt(stripped)
 
     async def _handle_prompt(self, prompt: str) -> CommandResult:
         turn = new_turn_context(prompt)
+        self.session.last_user_prompt = prompt
+        self.session.pending_follow_up_action = None
         if self._should_use_native_tool_loop(prompt):
             return await self._run_native_tool_loop(prompt, turn_id=turn.turn_id)
         request = ChatRequest(
@@ -210,6 +219,7 @@ class Orchestrator:
         for index, route in enumerate(routes):
             self.runtime_state.active_provider = route.provider_id
             self.runtime_state.active_model = route.alias or route.model_id
+            self.runtime_state.active_model_context_tokens = route.max_context_tokens
             await self.event_bus.publish(
                 EventEnvelope.create(
                     kind=EventKind.PROVIDER_SELECTED,
@@ -277,6 +287,7 @@ class Orchestrator:
                     },
                 )
             )
+            self._update_pending_follow_up_action(result.text)
             return CommandResult(output=result.text, render_mode=render_mode)
 
         if last_error is None:
@@ -316,6 +327,7 @@ class Orchestrator:
             if decision.get("action") == "answer":
                 answer = decision.get("answer")
                 if isinstance(answer, str) and answer.strip():
+                    self._update_pending_follow_up_action(answer)
                     return CommandResult(output=answer.strip(), render_mode="markdown")
                 break
             if decision.get("action") != "tool":
@@ -439,6 +451,14 @@ class Orchestrator:
 
     async def _cmd_help(self, _: list[str]) -> CommandResult:
         return CommandResult(output=HELP_TEXT)
+
+    async def _cmd_apply(self, _: list[str]) -> CommandResult:
+        if not self.session.last_user_prompt:
+            return CommandResult(output="No recent user request is available to apply.", is_error=True)
+        if not self.session.active_files:
+            return CommandResult(output="Apply needs active files. Use /add first.", is_error=True)
+        self.session.pending_follow_up_action = None
+        return await self._cmd_autoedit([self.session.last_user_prompt])
 
     async def _cmd_status(self, _: list[str]) -> CommandResult:
         snapshot = self.health_service.last_snapshot()
@@ -961,6 +981,7 @@ class Orchestrator:
         if route is None:
             return CommandResult(output=f"Unknown model alias: {alias}", is_error=True)
         self.runtime_state.manual_model_alias = alias
+        self.runtime_state.active_model_context_tokens = route.max_context_tokens
         return CommandResult(output=f"Pinned model alias: {alias}")
 
     async def _cmd_skill(self, args: list[str]) -> CommandResult:
@@ -1497,6 +1518,31 @@ class Orchestrator:
         if len(compact) <= limit:
             return compact
         return compact[: limit - 3] + "..."
+
+    def _update_pending_follow_up_action(self, response_text: str) -> None:
+        normalized = response_text.lower()
+        if any(
+            phrase in normalized
+            for phrase in (
+                "нужно ли мне начать",
+                "начать реализац",
+                "применять изменения",
+                "приступить к реализации",
+                "should i start",
+                "should i implement",
+                "apply these changes",
+            )
+        ):
+            self.session.pending_follow_up_action = "apply_last_prompt"
+            return
+        self.session.pending_follow_up_action = None
+
+    @staticmethod
+    def _is_apply_follow_up(text: str) -> bool:
+        normalized = " ".join(text.strip().split())
+        if not normalized:
+            return False
+        return bool(_FOLLOW_UP_CONFIRM_RE.match(normalized))
 
     def _remember_failure(self, action: str, command: str, summary: str) -> None:
         self.session.last_failed_action = action

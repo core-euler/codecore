@@ -31,6 +31,8 @@ class SessionRuntime:
     last_context_file_count: int = 0
     last_context_token_count: int = 0
     allowed_action_types: list[str] = field(default_factory=list)
+    last_user_prompt: str | None = None
+    pending_follow_up_action: str | None = None
 
 
 @dataclass(slots=True)
