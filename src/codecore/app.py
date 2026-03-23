@@ -16,6 +16,7 @@ from .execution.audit import FileChangeAudit
 from .execution.approvals import ApprovalManager
 from .execution.files import WorkspaceFiles
 from .execution.git import GitWorkspace
+from .execution.native_tools import NativeRepositoryTools
 from .execution.patches import PatchService
 from .execution.shell import ShellToolExecutor
 from .execution.tests import VerificationRunner
@@ -75,6 +76,7 @@ def create_app() -> CodeCoreApp:
     policy_engine = SimplePolicyEngine()
     event_bus = EventBus(sinks=[tracker, memory_store])
     context_manager = ContextManager(bootstrap.settings.project_root)
+    native_tools = NativeRepositoryTools(context_manager, RepoMapBuilder(bootstrap.settings.project_root))
     skill_dirs = [bootstrap.settings.skills_dir]
     if bootstrap.settings.legacy_skills_dir.exists() and bootstrap.settings.legacy_skills_dir != bootstrap.settings.skills_dir:
         skill_dirs.append(bootstrap.settings.legacy_skills_dir)
@@ -125,6 +127,7 @@ def create_app() -> CodeCoreApp:
         analytics_service=analytics_service,
         multi_agent_runner=multi_agent_runner,
         tool_executor=tool_executor,
+        native_tool_executor=native_tools,
         policy_engine=policy_engine,
         git_workspace=git_workspace,
         patch_service=patch_service,

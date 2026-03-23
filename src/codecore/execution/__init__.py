@@ -6,6 +6,7 @@ from .changesets import ChangeSet, ChangeSetApplier, ChangeSetApplyResult, Chang
 from .editing import EditOperation, EditPlan, StructuredEditParser
 from .files import FileSnapshot, WorkspaceFiles
 from .git import GitWorkspace
+from .native_tools import NativeRepositoryTools, NativeToolCall
 from .patches import PatchApplication, PatchService
 from .shell import ShellToolExecutor, summarize_output
 from .sandbox import SandboxProfile
@@ -26,6 +27,8 @@ __all__ = [
     "FileChangeRecord",
     "FileSnapshot",
     "GitWorkspace",
+    "NativeRepositoryTools",
+    "NativeToolCall",
     "PatchApplication",
     "PatchService",
     "SandboxProfile",

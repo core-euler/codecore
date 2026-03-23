@@ -22,6 +22,7 @@ from codecore.execution.audit import FileChangeAudit
 from codecore.execution.approvals import ApprovalManager
 from codecore.execution.files import WorkspaceFiles
 from codecore.execution.git import GitWorkspace
+from codecore.execution.native_tools import NativeRepositoryTools
 from codecore.execution.patches import PatchService
 from codecore.execution.sandbox import SandboxProfile
 from codecore.execution.shell import ShellToolExecutor, summarize_output
@@ -77,6 +78,40 @@ class ScriptedAdapterFactory:
         return ScriptedAdapter(route, self._response_text)
 
 
+class ScriptedSequenceAdapterFactory:
+    def __init__(self, responses: list[str]) -> None:
+        self._responses = list(responses)
+        self.calls = 0
+
+    def create(self, route):
+        return _ScriptedSequenceAdapter(route, self)
+
+
+class _ScriptedSequenceAdapter:
+    def __init__(self, route, factory: ScriptedSequenceAdapterFactory) -> None:
+        self._route = route
+        self._factory = factory
+
+    async def chat(self, request):
+        response = self._factory._responses[min(self._factory.calls, len(self._factory._responses) - 1)]
+        self._factory.calls += 1
+        return ChatResult(text=response, latency_ms=5, metadata={"scripted": True})
+
+    async def stream(self, request):
+        response = self._factory._responses[min(self._factory.calls, len(self._factory._responses) - 1)]
+        self._factory.calls += 1
+        yield response
+
+    async def health(self):
+        from codecore.domain.enums import HealthState
+        from codecore.domain.models import HealthStatus
+
+        return HealthStatus(state=HealthState.HEALTHY, checked_at=HealthStatus.unknown().checked_at, detail="ok")
+
+    def capabilities(self):
+        return route_capabilities(self._route)
+
+
 class ExecutionRuntimeTest(unittest.TestCase):
     def test_policy_allows_read_only_command(self) -> None:
         decision = SimplePolicyEngine().evaluate_command("pwd")
@@ -99,7 +134,7 @@ class ExecutionRuntimeTest(unittest.TestCase):
         self.assertEqual(profile.name, "workspace-write")
 
     def test_orchestrator_runs_read_only_command(self) -> None:
-        registry = ProviderRegistry(load_provider_registry(ROOT / "providers" / "registry.yaml"))
+        registry = ProviderRegistry(load_provider_registry(ROOT / ".codecore" / "providers" / "registry.yaml"))
         health = ProviderHealthService(registry, AdapterFactory())
         sink = RecordingSink()
         session = new_session_runtime()
@@ -138,7 +173,7 @@ class ExecutionRuntimeTest(unittest.TestCase):
         self.assertIn(EventKind.TOOL_FINISHED, kinds)
 
     def test_orchestrator_blocks_mutating_run_command(self) -> None:
-        registry = ProviderRegistry(load_provider_registry(ROOT / "providers" / "registry.yaml"))
+        registry = ProviderRegistry(load_provider_registry(ROOT / ".codecore" / "providers" / "registry.yaml"))
         health = ProviderHealthService(registry, AdapterFactory())
         sink = RecordingSink()
         session = new_session_runtime()
@@ -174,7 +209,7 @@ class ExecutionRuntimeTest(unittest.TestCase):
         self.assertIn(EventKind.POLICY_BLOCKED, kinds)
 
     def test_orchestrator_approval_flow_executes_command(self) -> None:
-        registry = ProviderRegistry(load_provider_registry(ROOT / "providers" / "registry.yaml"))
+        registry = ProviderRegistry(load_provider_registry(ROOT / ".codecore" / "providers" / "registry.yaml"))
         health = ProviderHealthService(registry, AdapterFactory())
         sink = RecordingSink()
         session = new_session_runtime()
@@ -211,6 +246,119 @@ class ExecutionRuntimeTest(unittest.TestCase):
         self.assertIn("Approval required:", blocked_output)
         self.assertIn("stdout:\nhello", approved_output)
         self.assertIn("sandbox=workspace-write", approved_output)
+
+    def test_prompt_tool_loop_reads_file_and_answers_in_one_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            docs_dir = temp_path / "docs"
+            docs_dir.mkdir()
+            (docs_dir / "SPEC.md").write_text("# Spec\nCurrent bot flow handles psychotype results.\n", encoding="utf-8")
+            registry = ProviderRegistry(load_provider_registry(ROOT / ".codecore" / "providers" / "registry.yaml"))
+            adapter_factory = ScriptedSequenceAdapterFactory(
+                [
+                    json.dumps(
+                        {
+                            "action": "tool",
+                            "tool": "read",
+                            "args": {"path": "docs/SPEC.md", "start_line": 1, "end_line": 20},
+                            "message": "Reading the main specification.",
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "action": "answer",
+                            "answer": "Кратко: текущий сценарий завязан на обработке результата психотипа.",
+                        }
+                    ),
+                ]
+            )
+            health = ProviderHealthService(registry, adapter_factory)
+            session = new_session_runtime()
+            runtime_state = RuntimeState.default()
+            context_manager = ContextManager(temp_path)
+            orchestrator = Orchestrator(
+                session=session,
+                runtime_state=runtime_state,
+                provider_registry=registry,
+                broker=PolicyDrivenBroker(registry, health),
+                health_service=health,
+                adapter_factory=adapter_factory,
+                context_manager=context_manager,
+                context_composer=DefaultContextComposer(
+                    context_manager,
+                    session,
+                    runtime_state,
+                    ProjectManifest(project_id="temp-tool-loop"),
+                ),
+                event_bus=EventBus(sinks=[]),
+                native_tool_executor=NativeRepositoryTools(context_manager),
+            )
+
+            async def run() -> str:
+                result = await orchestrator.handle_line("Напиши кратко что в docs/SPEC.md про психотип")
+                self.assertFalse(result.is_error)
+                return result.output or ""
+
+            output = asyncio.run(run())
+            self.assertIn("текущий сценарий", output.lower())
+            self.assertIn("docs/SPEC.md", session.active_files)
+            self.assertEqual(adapter_factory.calls, 2)
+
+    def test_prompt_tool_loop_searches_then_answers(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            bot_dir = temp_path / "bot"
+            bot_dir.mkdir()
+            (bot_dir / "states.py").write_text("PSYCHOTYPE_READY = 'ready'\n", encoding="utf-8")
+            registry = ProviderRegistry(load_provider_registry(ROOT / ".codecore" / "providers" / "registry.yaml"))
+            adapter_factory = ScriptedSequenceAdapterFactory(
+                [
+                    json.dumps(
+                        {
+                            "action": "tool",
+                            "tool": "search",
+                            "args": {"query": "PSYCHOTYPE_READY", "path": "bot", "max_matches": 5},
+                            "message": "Searching bot states for psychotype handling.",
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "action": "answer",
+                            "answer": "Нашел точку входа: состояние `PSYCHOTYPE_READY` определено в `bot/states.py`.",
+                        }
+                    ),
+                ]
+            )
+            health = ProviderHealthService(registry, adapter_factory)
+            session = new_session_runtime()
+            runtime_state = RuntimeState.default()
+            context_manager = ContextManager(temp_path)
+            orchestrator = Orchestrator(
+                session=session,
+                runtime_state=runtime_state,
+                provider_registry=registry,
+                broker=PolicyDrivenBroker(registry, health),
+                health_service=health,
+                adapter_factory=adapter_factory,
+                context_manager=context_manager,
+                context_composer=DefaultContextComposer(
+                    context_manager,
+                    session,
+                    runtime_state,
+                    ProjectManifest(project_id="temp-tool-loop-search"),
+                ),
+                event_bus=EventBus(sinks=[]),
+                native_tool_executor=NativeRepositoryTools(context_manager),
+            )
+
+            async def run() -> str:
+                result = await orchestrator.handle_line("Где у нас определяется состояние психотипа?")
+                self.assertFalse(result.is_error)
+                return result.output or ""
+
+            output = asyncio.run(run())
+            self.assertIn("bot/states.py", output)
+            self.assertEqual(adapter_factory.calls, 2)
 
     def test_verify_command_runs_explicit_unittest(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

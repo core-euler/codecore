@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass, field
 
 from ..agents import MultiAgentRunner
@@ -16,6 +18,7 @@ from ..execution.audit import FileChangeAudit
 from ..execution.approvals import ApprovalManager
 from ..execution.editing import EditOperation, EditPlan, StructuredEditParser
 from ..execution.git import GitWorkspace
+from ..execution.native_tools import NativeRepositoryTools, NativeToolCall
 from ..execution.patches import PatchService
 from ..execution.sandbox import SandboxProfile
 from ..execution.shell import summarize_output
@@ -49,6 +52,36 @@ Rules:
 - do not include markdown, prose, or code fences unless the entire response is a json code fence
 """
 
+TOOL_LOOP_SYSTEM_PROMPT = """You are CodeCore's native repository inspection controller.
+You can either answer the user directly or request exactly one built-in tool.
+
+Available tools:
+- list {"path": ".", "max_entries": 80}
+- search {"query": "...", "path": ".", "max_matches": 20}
+- read {"path": "relative/file.py", "start_line": 1, "end_line": 200}
+- repo_map {"max_depth": 4}
+
+Return exactly one JSON object and nothing else:
+{"action": "tool", "tool": "search", "args": {"query": "psychotype", "path": "bot"}, "message": "Searching bot files for psychotype flow."}
+or
+{"action": "answer", "answer": "final markdown answer"}
+
+Rules:
+- Prefer search/list before read when the exact file is unknown.
+- Read only the minimum amount of content needed to answer accurately.
+- After you have enough evidence, return action=answer immediately in the user's language.
+- Never emit shell commands, Python snippets, pseudo-tool calls, or markdown fences.
+- Do not stop after a tool request; keep using tools until you can answer.
+"""
+
+_TOOL_LOOP_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*\})\s*```", re.DOTALL)
+_TOOL_LOOP_HINT_RE = re.compile(
+    r"(?:[/\\][\w.\-]+|\b\w+\.(?:py|md|js|ts|tsx|json|yaml|yml|txt|go|rs)\b|"
+    r"\b(?:file|files|repo|repository|code|function|class|module|handler|state|workflow|scenario|message|messages)\b|"
+    r"\b(?:файл|файлы|код|репозитор|сценар|сообщен|обработчик|состояни|найди|прочитай|посмотри|где)\b)",
+    re.IGNORECASE,
+)
+
 
 @dataclass(slots=True)
 class Orchestrator:
@@ -65,6 +98,7 @@ class Orchestrator:
     analytics_service: TelemetryAnalytics | None = None
     multi_agent_runner: MultiAgentRunner | None = None
     tool_executor: ToolExecutor | None = None
+    native_tool_executor: NativeRepositoryTools | None = None
     policy_engine: PolicyEngine | None = None
     git_workspace: GitWorkspace | None = None
     patch_service: PatchService | None = None
@@ -137,6 +171,8 @@ class Orchestrator:
 
     async def _handle_prompt(self, prompt: str) -> CommandResult:
         turn = new_turn_context(prompt)
+        if self._should_use_native_tool_loop(prompt):
+            return await self._run_native_tool_loop(prompt, turn_id=turn.turn_id)
         request = ChatRequest(
             messages=(ChatMessage(role="user", content=prompt),),
             task_tag=self.session.task_tag,
@@ -146,7 +182,14 @@ class Orchestrator:
         self._update_context_metrics(request)
         return await self._invoke_request(prompt, request, turn_id=turn.turn_id)
 
-    async def _invoke_request(self, prompt: str, request: ChatRequest, *, turn_id: str) -> CommandResult:
+    async def _invoke_request(
+        self,
+        prompt: str,
+        request: ChatRequest,
+        *,
+        turn_id: str,
+        render_mode: str = "markdown",
+    ) -> CommandResult:
         if self.session.active_skills:
             await self.event_bus.publish(
                 EventEnvelope.create(
@@ -234,11 +277,165 @@ class Orchestrator:
                     },
                 )
             )
-            return CommandResult(output=result.text, render_mode="markdown")
+            return CommandResult(output=result.text, render_mode=render_mode)
 
         if last_error is None:
             return CommandResult(output="No provider routes were available for invocation.", is_error=True)
         return CommandResult(output=f"All provider routes failed: {last_error}", is_error=True)
+
+    async def _run_native_tool_loop(self, prompt: str, *, turn_id: str) -> CommandResult:
+        if self.native_tool_executor is None:
+            return await self._invoke_direct_prompt(prompt, turn_id=turn_id)
+
+        observations: list[str] = []
+        max_steps = 4
+        for step in range(max_steps):
+            request = ChatRequest(
+                messages=(
+                    ChatMessage(
+                        role="user",
+                        content=self._build_tool_loop_user_prompt(prompt, observations, step=step + 1, max_steps=max_steps),
+                    ),
+                ),
+                system_prompt=TOOL_LOOP_SYSTEM_PROMPT,
+                task_tag=self.session.task_tag,
+                model_hint=self.runtime_state.manual_model_alias,
+                max_output_tokens=900,
+                metadata={"mode": "tool-loop", "step": step + 1},
+            )
+            request = await self.context_composer.compose(request)
+            self._update_context_metrics(request)
+            result = await self._invoke_request(f"tool-loop: {prompt}", request, turn_id=turn_id, render_mode="text")
+            if result.is_error:
+                return result
+            decision = self._parse_tool_loop_response(result.output)
+            if decision is None:
+                if step == 0:
+                    return await self._invoke_direct_prompt(prompt, turn_id=turn_id)
+                break
+            if decision.get("action") == "answer":
+                answer = decision.get("answer")
+                if isinstance(answer, str) and answer.strip():
+                    return CommandResult(output=answer.strip(), render_mode="markdown")
+                break
+            if decision.get("action") != "tool":
+                break
+            tool = decision.get("tool")
+            args = decision.get("args", {})
+            message = decision.get("message", "")
+            if not isinstance(tool, str) or not isinstance(args, dict):
+                break
+            execution = await self._execute_native_tool(
+                NativeToolCall(tool=tool, args=args, message=message if isinstance(message, str) else "")
+            )
+            if execution.exit_code != 0:
+                observations.append(f"{tool} failed: {execution.stderr}")
+                break
+            observations.append(execution.stdout)
+
+        fallback_request = ChatRequest(
+            messages=(
+                ChatMessage(
+                    role="user",
+                    content=(
+                        f"User request:\n{prompt}\n\n"
+                        "You now have enough gathered repository observations. "
+                        "Respond with the final answer only."
+                    ),
+                ),
+            ),
+            task_tag=self.session.task_tag,
+            model_hint=self.runtime_state.manual_model_alias,
+        )
+        fallback_request = await self.context_composer.compose(fallback_request)
+        self._update_context_metrics(fallback_request)
+        return await self._invoke_request(prompt, fallback_request, turn_id=turn_id)
+
+    async def _invoke_direct_prompt(self, prompt: str, *, turn_id: str) -> CommandResult:
+        request = ChatRequest(
+            messages=(ChatMessage(role="user", content=prompt),),
+            task_tag=self.session.task_tag,
+            model_hint=self.runtime_state.manual_model_alias,
+        )
+        request = await self.context_composer.compose(request)
+        self._update_context_metrics(request)
+        return await self._invoke_request(prompt, request, turn_id=turn_id)
+
+    async def _execute_native_tool(self, call: NativeToolCall):
+        execution = self.native_tool_executor.execute(call)
+        await self.event_bus.publish(
+            EventEnvelope.create(
+                kind=EventKind.TOOL_CALLED,
+                session_id=self.session.session_id,
+                task_tag=self.session.task_tag,
+                payload={"command": call.tool, "tool_kind": "native", "message": call.message, "args": call.args},
+            )
+        )
+        await self.event_bus.publish(
+            EventEnvelope.create(
+                kind=EventKind.TOOL_FINISHED,
+                session_id=self.session.session_id,
+                task_tag=self.session.task_tag,
+                payload={
+                    "command": call.tool,
+                    "tool_kind": "native",
+                    "exit_code": execution.exit_code,
+                    "stdout": execution.stdout[:500],
+                    "stderr": execution.stderr[:500],
+                    **execution.metadata,
+                },
+            )
+        )
+        if execution.exit_code == 0:
+            touched = list(execution.affected_files)
+            if touched:
+                self.context_manager.add_files(self.session.active_files, touched)
+                self.runtime_state.active_files = list(self.session.active_files)
+            summary = execution.stdout or "<empty>"
+            title = call.message.strip() or self._native_tool_title(call, execution)
+            self._remember_tool_output(title, summary)
+        return execution
+
+    def _should_use_native_tool_loop(self, prompt: str) -> bool:
+        if self.native_tool_executor is None:
+            return False
+        if self.runtime_state.manual_model_alias == "mock":
+            return False
+        if self.session.active_files:
+            return True
+        return bool(_TOOL_LOOP_HINT_RE.search(prompt))
+
+    def _build_tool_loop_user_prompt(self, prompt: str, observations: list[str], *, step: int, max_steps: int) -> str:
+        lines = [f"User request:\n{prompt}", f"Current step: {step}/{max_steps}."]
+        if observations:
+            lines.append("Tool observations gathered so far:\n" + "\n\n".join(observations[-3:]))
+        if step == max_steps:
+            lines.append("This is the final step. Return action=answer.")
+        return "\n\n".join(lines)
+
+    def _parse_tool_loop_response(self, text: str) -> dict[str, object] | None:
+        raw = text.strip()
+        if not raw:
+            return None
+        match = _TOOL_LOOP_JSON_RE.search(raw)
+        if match:
+            raw = match.group(1)
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        return parsed
+
+    def _native_tool_title(self, call: NativeToolCall, execution) -> str:
+        path = execution.metadata.get("path")
+        if isinstance(path, str) and path:
+            return f"{call.tool} {path}"
+        query = execution.metadata.get("query")
+        if isinstance(query, str) and query:
+            return f"{call.tool} {query}"
+        return call.tool
 
     async def _cmd_help(self, _: list[str]) -> CommandResult:
         return CommandResult(output=HELP_TEXT)
