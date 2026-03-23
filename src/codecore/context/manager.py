@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..governance.security import guard_untrusted_content
 from .token_budget import estimate_text_tokens
 
 _SYMBOL_PATTERNS = (
@@ -141,7 +142,8 @@ class ContextManager:
             content = self.read_text(relative)
             if content is None:
                 continue
-            blocks.append(f"FILE: {relative}\n```\n{content}\n```")
+            guarded = guard_untrusted_content(f"file:{relative}", content)
+            blocks.append(f"FILE: {relative}\n```\n{guarded.rendered}\n```")
         return "\n\n".join(blocks)
 
     def _extract_headings(self, lines: list[str], limit: int = 6) -> tuple[str, ...]:

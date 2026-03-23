@@ -10,6 +10,7 @@ from pathlib import Path
 from ..domain.contracts import ToolExecutor
 from ..domain.enums import ToolKind
 from ..domain.results import ToolExecutionResult
+from ..governance.security import redact_secrets, sanitize_text
 
 
 @dataclass(slots=True, frozen=True)
@@ -57,6 +58,7 @@ class ShellToolExecutor(ToolExecutor):
 
 
 def summarize_output(text: str, *, max_chars: int = 2000, head_lines: int = 16, tail_lines: int = 10) -> OutputSummary:
+    text = redact_secrets(sanitize_text(text))
     if len(text) <= max_chars:
         return OutputSummary(rendered=text.strip(), truncated=False, original_chars=len(text))
     lines = text.splitlines()

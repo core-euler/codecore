@@ -11,6 +11,7 @@ from uuid import uuid4
 from ..domain.contracts import TelemetrySink
 from ..domain.enums import EventKind
 from ..domain.events import EventEnvelope
+from ..governance.security import scrub_for_storage
 from ..infra import sqlite as sqlite_helpers
 
 
@@ -36,7 +37,7 @@ class TelemetryTracker(TelemetrySink):
                 record[key] = value.isoformat()
             elif hasattr(value, "value"):
                 record[key] = value.value
-        return record
+        return scrub_for_storage(record)
 
     def _project(self, event: EventEnvelope) -> None:
         if event.kind == EventKind.SESSION_STARTED:

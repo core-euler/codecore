@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..governance.security import guard_untrusted_content
 from .token_budget import estimate_text_tokens
 
 
@@ -19,8 +20,10 @@ class ContextChunk:
 
     def render(self) -> str:
         if self.kind == "summary":
-            return f"FILE SUMMARY: {self.path}\n{self.text}"
-        return f"FILE: {self.path} [lines {self.start_line}-{self.end_line}]\n```\n{self.text}\n```"
+            guarded = guard_untrusted_content(f"file-summary:{self.path}", self.text)
+            return f"FILE SUMMARY: {self.path}\n{guarded.rendered}"
+        guarded = guard_untrusted_content(f"file:{self.path}", self.text)
+        return f"FILE: {self.path} [lines {self.start_line}-{self.end_line}]\n```\n{guarded.rendered}\n```"
 
 
 class FileChunker:

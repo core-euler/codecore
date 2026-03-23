@@ -1,6 +1,6 @@
 # CodeCore Roadmap
 ## Живой roadmap проекта с текущим статусом, этапами и критериями готовности
-`updated: 2026-03-23 (phase 6 feature set implemented, hardening remains)`
+`updated: 2026-03-23 (phase 7 started: security hardening slice added)`
 
 ---
 
@@ -75,6 +75,7 @@
 - [ ] MCP integration
 - [ ] CI pipeline
 - [ ] production-grade self-healing verification loop
+- [x] Есть базовый security hardening slice: threat model, redaction, untrusted-content guardrails
 
 ### Текущая фаза
 
@@ -84,7 +85,8 @@
 - `Phase 3` завершена: context + skills foundation работает end-to-end
 - `Phase 4` завершена: memory + analytics layer работает end-to-end
 - `Phase 5` завершена: execution + automation loop работает end-to-end
-- `Phase 6` почти завершена: feature set реализован, осталось доказать quality gain и закрыть hardening
+- `Phase 6` почти завершена: feature set реализован, осталось доказать quality gain
+- `Phase 7` начата: security hardening slice реализован
 
 ---
 
@@ -461,10 +463,10 @@
 
 ### Security and governance
 
-- [ ] Threat model document
-- [ ] Secret hygiene checks
-- [ ] Input sanitization for untrusted content
-- [ ] Prompt injection protections
+- [x] Threat model document
+- [x] Secret hygiene checks
+- [x] Input sanitization for untrusted content
+- [x] Prompt injection protections
 - [ ] MCP trust scoring
 - [ ] Cost guardrails
 - [ ] Rate limiting / budget limiting
@@ -552,7 +554,7 @@
 
 ### Следующий обязательный этап
 
-- [ ] Закрыть `Phase 6` через benchmark evidence, hardening и quality proof loops
+- [ ] Закрыть `Phase 6` через benchmark evidence и quality proof loops
 
 ### Конкретный ближайший срез
 
@@ -566,6 +568,7 @@
 ### После этого
 
 - [ ] зафиксировать benchmark evidence и quality deltas
+- [ ] начать CI + release hardening slice
 
 ---
 
