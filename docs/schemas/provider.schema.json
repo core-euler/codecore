@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://codecore.dev/schemas/provider.schema.json",
+  "title": "CodeCore Provider Manifest",
+  "type": "object",
+  "required": ["provider_id", "transport", "models"],
+  "properties": {
+    "provider_id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+    "transport": { "type": "string" },
+    "base_url": { "type": ["string", "null"] },
+    "auth_strategy": { "type": ["string", "null"] },
+    "priority": { "type": "integer", "minimum": 1, "default": 100 },
+    "vpn_required": { "type": "boolean", "default": false },
+    "models": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string" },
+          "alias": { "type": ["string", "null"] },
+          "max_context": { "type": ["integer", "null"], "minimum": 1 },
+          "supports_tools": { "type": "boolean", "default": false },
+          "supports_json": { "type": "boolean", "default": false },
+          "supports_vision": { "type": "boolean", "default": false },
+          "cost_per_1k_in": { "type": ["number", "null"], "minimum": 0 },
+          "cost_per_1k_out": { "type": ["number", "null"], "minimum": 0 }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

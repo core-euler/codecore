@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://codecore.dev/schemas/mcp-server.schema.json",
+  "title": "CodeCore MCP Server Manifest",
+  "type": "object",
+  "required": ["server_id", "transport"],
+  "properties": {
+    "server_id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+    "transport": { "type": "string", "enum": ["stdio", "http", "sse", "streamable-http"] },
+    "command": { "type": ["string", "null"] },
+    "args": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "url": { "type": ["string", "null"] },
+    "auth_mode": { "type": ["string", "null"] },
+    "risk_class": { "type": ["string", "null"] },
+    "trust_level": { "type": ["string", "null"] },
+    "data_sensitivity": { "type": ["string", "null"] }
+  },
+  "additionalProperties": true
+}

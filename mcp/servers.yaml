@@ -1,0 +1,16 @@
+servers:
+  - server_id: filesystem
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
+    auth_mode: none
+    risk_class: workspace_write
+    trust_level: high
+    data_sensitivity: project
+  - server_id: figma
+    transport: streamable-http
+    url: https://mcp.figma.com/stream
+    auth_mode: oauth
+    risk_class: read_only
+    trust_level: medium
+    data_sensitivity: external

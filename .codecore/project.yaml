@@ -1,0 +1,14 @@
+version: 1
+project_id: codecore
+default_task_tag: arch
+context:
+  max_prompt_tokens: 24000
+  auto_compact_threshold_pct: 80
+skills:
+  auto_activate: true
+  defaults: []
+providers:
+  preferred_aliases: [ds-v3, codestral]
+  allow_vpn_routes: false
+policies:
+  approval_policy: on-write
