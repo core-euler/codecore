@@ -1,0 +1,56 @@
+providers:
+  - provider_id: deepseek
+    transport: openai-compatible
+    base_url: https://api.deepseek.com
+    auth_strategy: env:DEEPSEEK_API_KEY
+    priority: 1
+    vpn_required: false
+    models:
+      - id: deepseek-chat
+        alias: ds-v3
+        max_context: 128000
+        supports_tools: true
+        supports_json: true
+        cost_per_1k_in: 0.00014
+        cost_per_1k_out: 0.00028
+      - id: deepseek-reasoner
+        alias: ds-r1
+        max_context: 128000
+        supports_tools: true
+        supports_json: true
+        cost_per_1k_in: 0.00055
+        cost_per_1k_out: 0.00219
+  - provider_id: mistral
+    transport: openai-compatible
+    base_url: https://api.mistral.ai
+    auth_strategy: env:MISTRAL_API_KEY
+    priority: 2
+    vpn_required: false
+    models:
+      - id: codestral-latest
+        alias: codestral
+        max_context: 32000
+        supports_tools: true
+        supports_json: true
+  - provider_id: openrouter
+    transport: openai-compatible
+    base_url: https://openrouter.ai/api/v1
+    auth_strategy: env:OPENROUTER_API_KEY
+    priority: 3
+    vpn_required: true
+    models:
+      - id: anthropic/claude-sonnet-4-5
+        alias: claude
+        max_context: 200000
+        supports_tools: true
+        supports_json: true
+  - provider_id: mock
+    transport: internal
+    priority: 999
+    vpn_required: false
+    models:
+      - id: mock-chat
+        alias: mock
+        max_context: 16000
+        supports_tools: false
+        supports_json: true

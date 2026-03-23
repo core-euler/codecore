@@ -18,7 +18,10 @@ HELP_TEXT = """Available commands:
                     Restore the latest snapshot-backed patch without git
   /retry            Retry the last failed /run or /verify command
   /approvals        Show pending approval requests
-  /approve <id>      Approve and execute a pending risky command
+  /approve <id|latest|1|2>
+                    Approve a pending risky command once, or allow its action type for this session
+  /dismiss <id|latest|3>
+                    Dismiss a pending approval request
   /verify [command]  Run verification using default or explicit test command
   /diff [paths]      Show git status and diff for the workspace or active files
   /undo [paths]      Restore tracked files from HEAD when available
@@ -33,4 +36,8 @@ HELP_TEXT = """Available commands:
   /unpin <file...>   Alias for /drop
   /clear             Clear active files and model pin
   /exit              End the session
+
+Input:
+  Enter submits the prompt
+  Ctrl+J inserts a newline
 """

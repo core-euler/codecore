@@ -75,7 +75,10 @@ def create_app() -> CodeCoreApp:
     policy_engine = SimplePolicyEngine()
     event_bus = EventBus(sinks=[tracker, memory_store])
     context_manager = ContextManager(bootstrap.settings.project_root)
-    skill_registry = LocalSkillRegistry.from_loader(SkillLoader((bootstrap.settings.skills_dir,)))
+    skill_dirs = [bootstrap.settings.skills_dir]
+    if bootstrap.settings.legacy_skills_dir.exists() and bootstrap.settings.legacy_skills_dir != bootstrap.settings.skills_dir:
+        skill_dirs.append(bootstrap.settings.legacy_skills_dir)
+    skill_registry = LocalSkillRegistry.from_loader(SkillLoader(tuple(skill_dirs)))
     skill_resolver = SkillResolver(
         skill_registry,
         defaults=tuple(bootstrap.project_manifest.skills.defaults),

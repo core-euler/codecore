@@ -52,8 +52,17 @@ class ApprovalManager:
     def resolve(self, approval_id: str) -> ApprovalRequest | None:
         return self._pending.pop(approval_id, None)
 
+    def dismiss(self, approval_id: str) -> ApprovalRequest | None:
+        return self._pending.pop(approval_id, None)
+
     def get(self, approval_id: str) -> ApprovalRequest | None:
         return self._pending.get(approval_id)
+
+    def latest(self) -> ApprovalRequest | None:
+        pending = self.list_pending()
+        if not pending:
+            return None
+        return pending[-1]
 
     def list_pending(self) -> tuple[ApprovalRequest, ...]:
         return tuple(sorted(self._pending.values(), key=lambda item: item.created_at))

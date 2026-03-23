@@ -14,6 +14,7 @@ class CommandResult:
     output: str = ""
     should_exit: bool = False
     is_error: bool = False
+    render_mode: str = "text"
 
 
 class CommandRouter:

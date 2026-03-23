@@ -12,7 +12,7 @@ def build_status_line(session: SessionRuntime, state: RuntimeState) -> str:
     return (
         f"[codecore] provider={provider}"
         f" | model={model}"
-        f" | ctx={len(session.active_files)} files"
+        f" | ctx={session.last_context_file_count} files / {session.last_context_token_count} tok"
         f" | req={session.request_count}"
         f" | cost=${session.total_cost_usd:.4f}"
     )

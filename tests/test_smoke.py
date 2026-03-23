@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from codecore.app import create_app
 from codecore.bootstrap import bootstrap_application
 from codecore.domain.events import EventEnvelope
 from codecore.domain.enums import EventKind
+from codecore.infra.settings import load_settings
 
 
 class BootstrapSmokeTest(unittest.TestCase):
@@ -33,6 +35,21 @@ class BootstrapSmokeTest(unittest.TestCase):
     def test_app_factory_returns_app(self) -> None:
         app = create_app()
         self.assertEqual(app.bootstrap.project_manifest.project_id, "codecore")
+
+    def test_load_settings_bootstraps_scaffold_in_empty_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir).resolve()
+            previous = Path.cwd()
+            os.chdir(temp_path)
+            try:
+                settings = load_settings()
+                self.assertEqual(settings.project_config_path, temp_path / ".codecore" / "project.yaml")
+                self.assertTrue(settings.project_config_path.exists())
+                self.assertTrue(settings.provider_registry_path.exists())
+                self.assertTrue(settings.mcp_registry_path.exists())
+                self.assertTrue(settings.skills_dir.exists())
+            finally:
+                os.chdir(previous)
 
 
 class EntryPointSmokeTest(unittest.TestCase):

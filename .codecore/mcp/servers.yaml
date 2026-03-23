@@ -1,0 +1,13 @@
+servers:
+  - server_id: filesystem
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
+    trust_level: project
+    risk_class: readwrite
+  - server_id: git
+    transport: stdio
+    command: uvx
+    args: ["mcp-server-git"]
+    trust_level: project
+    risk_class: readonly

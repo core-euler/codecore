@@ -28,6 +28,9 @@ class SessionRuntime:
     last_failed_command: str | None = None
     last_failed_summary: str | None = None
     recent_patches: list[tuple[str, str | None]] = field(default_factory=list)
+    last_context_file_count: int = 0
+    last_context_token_count: int = 0
+    allowed_action_types: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

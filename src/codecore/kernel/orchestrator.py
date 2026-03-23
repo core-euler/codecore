@@ -89,6 +89,7 @@ class Orchestrator:
         self.command_router.register("retry", self._cmd_retry)
         self.command_router.register("approvals", self._cmd_approvals)
         self.command_router.register("approve", self._cmd_approve)
+        self.command_router.register("dismiss", self._cmd_dismiss)
         self.command_router.register("verify", self._cmd_verify)
         self.command_router.register("diff", self._cmd_diff)
         self.command_router.register("undo", self._cmd_undo)
@@ -142,6 +143,7 @@ class Orchestrator:
             model_hint=self.runtime_state.manual_model_alias,
         )
         request = await self.context_composer.compose(request)
+        self._update_context_metrics(request)
         return await self._invoke_request(prompt, request, turn_id=turn.turn_id)
 
     async def _invoke_request(self, prompt: str, request: ChatRequest, *, turn_id: str) -> CommandResult:
@@ -232,7 +234,7 @@ class Orchestrator:
                     },
                 )
             )
-            return CommandResult(output=result.text)
+            return CommandResult(output=result.text, render_mode="markdown")
 
         if last_error is None:
             return CommandResult(output="No provider routes were available for invocation.", is_error=True)
@@ -261,8 +263,11 @@ class Orchestrator:
             f"model={self.runtime_state.active_model or self.runtime_state.manual_model_alias or 'auto'}\n"
             f"recommended_model={recommended_model}\n"
             f"active_files={files}\n"
+            f"context_files={self.session.last_context_file_count}\n"
+            f"context_tokens={self.session.last_context_token_count}\n"
             f"active_skills={active_skills}\n"
             f"pinned_skills={pinned_skills}\n"
+            f"allowed_approval_types={', '.join(self.session.allowed_action_types) if self.session.allowed_action_types else '<none>'}\n"
             f"pending_approvals={len(self.approval_manager.list_pending()) if self.approval_manager is not None else 0}\n"
             f"last_turn_id={self.session.last_turn_id or '<none>'}\n"
             f"last_rating={self.session.last_rating if self.session.last_rating is not None else '<none>'}\n"
@@ -355,6 +360,9 @@ class Orchestrator:
                 reason=f"Applying {len(result.change_set.entries)} change-set file(s) will mutate the main workspace.",
                 safer_alternative="Inspect the isolated workspace diff before approving apply-back.",
             )
+            if self._is_action_type_allowed("delegate-apply"):
+                apply_result = await self._apply_delegate_change_set(result.change_set, approved=True)
+                return CommandResult(output=result.summary + "\n\n" + apply_result.output, is_error=apply_result.is_error)
             approval = await self._request_approval_or_block(
                 "delegate-apply",
                 f"delegate apply {instruction}",
@@ -441,6 +449,8 @@ class Orchestrator:
         command = " ".join(args)
         decision = await self.policy_engine.evaluate_tool_call(command)
         if decision.action.value != "allow":
+            if self._is_action_type_allowed("run"):
+                return await self._execute_shell_command(command, decision, approved=True, verify_after=verify_after)
             return await self._request_approval_or_block("run", command, decision)
         return await self._execute_shell_command(command, decision, verify_after=verify_after)
 
@@ -492,6 +502,8 @@ class Orchestrator:
             reason=f"Applying {len(plan.edits)} model-generated edit(s) mutates workspace files.",
             safer_alternative="Inspect the proposed diff summary before approving the edit plan.",
         )
+        if self._is_action_type_allowed("autoedit"):
+            return await self._apply_edit_plan(tuple(plan.edits), verify_after=verify_after, approved=True)
         approval = await self._request_approval_or_block(
             "autoedit",
             f"autoedit {instruction}",
@@ -523,6 +535,8 @@ class Orchestrator:
             reason=f"Replacing text in {path} mutates workspace files.",
             safer_alternative="Inspect the file with /add or /diff before approving the edit.",
         )
+        if self._is_action_type_allowed("replace"):
+            return await self._apply_replace(path, needle, replacement, verify_after=verify_after, approved=True)
         return await self._request_approval_or_block(
             "replace",
             f"replace {path}",
@@ -586,26 +600,40 @@ class Orchestrator:
         if not pending:
             return CommandResult(output="No pending approvals.")
         lines = []
-        for item in pending:
+        for index, item in enumerate(pending, start=1):
             lines.append(
-                f"{item.approval_id} | {item.action} | {item.risk_level.value} | {item.command} | {item.reason}"
+                f"{index}. {item.approval_id} | {item.action} | {item.risk_level.value} | {self._summarize_command(item.command)}"
             )
+            lines.append("   1 allow once: /approve " + item.approval_id)
+            lines.append("   2 allow this type: /approve 2")
+            lines.append("   3 dismiss: /dismiss " + item.approval_id)
         return CommandResult(output="\n".join(lines))
 
     async def _cmd_approve(self, args: list[str]) -> CommandResult:
         if not args:
-            return CommandResult(output="Usage: /approve <approval-id>", is_error=True)
+            return CommandResult(output="Usage: /approve <approval-id|latest|1|2>", is_error=True)
         if self.approval_manager is None:
             return CommandResult(output="Approval manager is not configured.", is_error=True)
         approval_id = args[0]
-        if approval_id == "latest":
-            pending = self.approval_manager.list_pending()
-            if not pending:
+        allow_type = False
+        if approval_id in {"1", "latest"}:
+            approval = self.approval_manager.latest()
+            if approval is None:
                 return CommandResult(output="No pending approvals.", is_error=True)
-            approval_id = pending[-1].approval_id
+            approval_id = approval.approval_id
+        elif approval_id == "2":
+            approval = self.approval_manager.latest()
+            if approval is None:
+                return CommandResult(output="No pending approvals.", is_error=True)
+            approval_id = approval.approval_id
+            allow_type = True
         approval = self.approval_manager.resolve(approval_id)
         if approval is None:
             return CommandResult(output=f"Unknown approval id: {approval_id}", is_error=True)
+        prefix = ""
+        if allow_type:
+            self._allow_action_type(approval.action)
+            prefix = f"Approved action type for this session: {approval.action}\n"
         decision = PolicyDecision(
             action=PolicyAction.ALLOW,
             risk_level=approval.risk_level,
@@ -613,20 +641,22 @@ class Orchestrator:
             safer_alternative=approval.safer_alternative,
         )
         if approval.action == "run":
-            return await self._execute_shell_command(approval.command, decision, approved=True)
+            result = await self._execute_shell_command(approval.command, decision, approved=True)
+            return self._prepend_output(prefix, result)
         if approval.action == "replace":
             path = approval.metadata.get("path")
             needle = approval.metadata.get("needle")
             replacement = approval.metadata.get("replacement")
             if not isinstance(path, str) or not isinstance(needle, str) or not isinstance(replacement, str):
                 return CommandResult(output="Approval payload for replace is invalid.", is_error=True)
-            return await self._apply_replace(
+            result = await self._apply_replace(
                 path,
                 needle,
                 replacement,
                 verify_after=bool(approval.metadata.get("verify_after")),
                 approved=True,
             )
+            return self._prepend_output(prefix, result)
         if approval.action == "autoedit":
             raw_edits = approval.metadata.get("edits")
             if not isinstance(raw_edits, list):
@@ -642,16 +672,37 @@ class Orchestrator:
                 if not isinstance(path, str) or not isinstance(old, str) or not isinstance(new, str) or not isinstance(reason, str):
                     return CommandResult(output="Approval payload for autoedit is invalid.", is_error=True)
                 edits.append(EditOperation(path=path, old=old, new=new, reason=reason))
-            return await self._apply_edit_plan(tuple(edits), verify_after=bool(approval.metadata.get("verify_after")), approved=True)
+            result = await self._apply_edit_plan(
+                tuple(edits),
+                verify_after=bool(approval.metadata.get("verify_after")),
+                approved=True,
+            )
+            return self._prepend_output(prefix, result)
         if approval.action == "delegate-apply":
             try:
                 change_set = self._deserialize_change_set(approval.metadata)
             except ValueError as exc:
                 return CommandResult(output=f"Approval payload for delegate apply is invalid: {exc}", is_error=True)
-            return await self._apply_delegate_change_set(change_set, approved=True)
+            result = await self._apply_delegate_change_set(change_set, approved=True)
+            return self._prepend_output(prefix, result)
         if approval.action == "verify":
-            return await self._execute_verification(approval.command or None, approved=True)
+            result = await self._execute_verification(approval.command or None, approved=True)
+            return self._prepend_output(prefix, result)
         return CommandResult(output=f"Unsupported approval action: {approval.action}", is_error=True)
+
+    async def _cmd_dismiss(self, args: list[str]) -> CommandResult:
+        if self.approval_manager is None:
+            return CommandResult(output="Approval manager is not configured.", is_error=True)
+        approval_id = args[0] if args else "latest"
+        if approval_id in {"3", "latest"}:
+            approval = self.approval_manager.latest()
+            if approval is None:
+                return CommandResult(output="No pending approvals.", is_error=True)
+            approval_id = approval.approval_id
+        dismissed = self.approval_manager.dismiss(approval_id)
+        if dismissed is None:
+            return CommandResult(output=f"Unknown approval id: {approval_id}", is_error=True)
+        return CommandResult(output=f"Dismissed approval: {dismissed.approval_id} ({dismissed.action})")
 
     async def _cmd_verify(self, args: list[str]) -> CommandResult:
         if self.verification_engine is None:
@@ -660,6 +711,8 @@ class Orchestrator:
         if command and self.policy_engine is not None:
             decision = await self.policy_engine.evaluate_tool_call(command)
             if decision.action.value != "allow":
+                if self._is_action_type_allowed("verify"):
+                    return await self._execute_verification(command, approved=True)
                 return await self._request_approval_or_block("verify", command, decision)
         return await self._execute_verification(command)
 
@@ -843,7 +896,9 @@ class Orchestrator:
         message = decision.reason or "Command blocked by policy."
         if approval_id is not None:
             message += f"\nApproval required: {approval_id}"
-            message += f"\nApprove with: /approve {approval_id}"
+            message += "\n1. allow once: /approve 1"
+            message += "\n2. allow this type: /approve 2"
+            message += "\n3. dismiss: /dismiss 3"
         if decision.safer_alternative:
             message += f"\nSafer alternative: {decision.safer_alternative}"
         return CommandResult(output=message, is_error=True)
@@ -1210,6 +1265,46 @@ class Orchestrator:
         self.session.recent_tool_outputs.append(block)
         if len(self.session.recent_tool_outputs) > keep:
             self.session.recent_tool_outputs[:] = self.session.recent_tool_outputs[-keep:]
+
+    def _update_context_metrics(self, request: ChatRequest) -> None:
+        reports = request.metadata.get("selected_context_reports", [])
+        if not isinstance(reports, list):
+            self.session.last_context_file_count = 0
+            self.session.last_context_token_count = 0
+            return
+        token_count = 0
+        for item in reports:
+            if isinstance(item, dict):
+                value = item.get("selected_tokens")
+                if isinstance(value, int):
+                    token_count += value
+        self.session.last_context_file_count = len(reports)
+        self.session.last_context_token_count = token_count
+
+    def _is_action_type_allowed(self, action: str) -> bool:
+        return action in self.session.allowed_action_types
+
+    def _allow_action_type(self, action: str) -> None:
+        if action not in self.session.allowed_action_types:
+            self.session.allowed_action_types.append(action)
+
+    @staticmethod
+    def _prepend_output(prefix: str, result: CommandResult) -> CommandResult:
+        if not prefix:
+            return result
+        return CommandResult(
+            output=prefix + result.output,
+            should_exit=result.should_exit,
+            is_error=result.is_error,
+            render_mode=result.render_mode,
+        )
+
+    @staticmethod
+    def _summarize_command(command: str, *, limit: int = 96) -> str:
+        compact = " ".join(command.split())
+        if len(compact) <= limit:
+            return compact
+        return compact[: limit - 3] + "..."
 
     def _remember_failure(self, action: str, command: str, summary: str) -> None:
         self.session.last_failed_action = action

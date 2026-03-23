@@ -24,13 +24,13 @@ class ManifestLoaderTest(unittest.TestCase):
         self.assertEqual(manifest.policies.approval_policy, "on-write")
 
     def test_provider_registry_loads(self) -> None:
-        registry = load_provider_registry(ROOT / "providers" / "registry.yaml")
+        registry = load_provider_registry(ROOT / ".codecore" / "providers" / "registry.yaml")
         self.assertGreaterEqual(len(registry.providers), 3)
         self.assertEqual(registry.providers[0].provider_id, "deepseek")
         self.assertEqual(registry.providers[0].models[0].alias, "ds-v3")
 
     def test_mcp_registry_loads(self) -> None:
-        registry = load_mcp_registry(ROOT / "mcp" / "servers.yaml")
+        registry = load_mcp_registry(ROOT / ".codecore" / "mcp" / "servers.yaml")
         self.assertEqual(len(registry.servers), 2)
         self.assertEqual(registry.servers[0].server_id, "filesystem")
 
