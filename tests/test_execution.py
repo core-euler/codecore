@@ -258,16 +258,15 @@ class ExecutionRuntimeTest(unittest.TestCase):
                 [
                     json.dumps(
                         {
-                            "action": "tool",
-                            "tool": "read",
-                            "args": {"path": "docs/SPEC.md", "start_line": 1, "end_line": 20},
+                            "type": "tool_call",
                             "message": "Reading the main specification.",
+                            "tool_call": {"name": "read", "args": {"path": "docs/SPEC.md", "start_line": 1, "end_line": 20}},
                         }
                     ),
                     json.dumps(
                         {
-                            "action": "answer",
-                            "answer": "Кратко: текущий сценарий завязан на обработке результата психотипа.",
+                            "type": "final",
+                            "message": "Кратко: текущий сценарий завязан на обработке результата психотипа.",
                         }
                     ),
                 ]
@@ -317,16 +316,18 @@ class ExecutionRuntimeTest(unittest.TestCase):
                 [
                     json.dumps(
                         {
-                            "action": "tool",
-                            "tool": "search",
-                            "args": {"query": "PSYCHOTYPE_READY", "path": "bot", "max_matches": 5},
+                            "type": "tool_call",
                             "message": "Searching bot states for psychotype handling.",
+                            "tool_call": {
+                                "name": "search",
+                                "args": {"query": "PSYCHOTYPE_READY", "path": "bot", "max_matches": 5},
+                            },
                         }
                     ),
                     json.dumps(
                         {
-                            "action": "answer",
-                            "answer": "Нашел точку входа: состояние `PSYCHOTYPE_READY` определено в `bot/states.py`.",
+                            "type": "final",
+                            "message": "Нашел точку входа: состояние `PSYCHOTYPE_READY` определено в `bot/states.py`.",
                         }
                     ),
                 ]
@@ -362,6 +363,39 @@ class ExecutionRuntimeTest(unittest.TestCase):
             self.assertIn("bot/states.py", output)
             self.assertEqual(adapter_factory.calls, 2)
 
+    def test_prompt_requires_json_response_envelope(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            registry = ProviderRegistry(load_provider_registry(ROOT / ".codecore" / "providers" / "registry.yaml"))
+            adapter_factory = ScriptedAdapterFactory("plain text answer without json")
+            health = ProviderHealthService(registry, adapter_factory)
+            session = new_session_runtime()
+            runtime_state = RuntimeState.default()
+            context_manager = ContextManager(temp_path)
+            orchestrator = Orchestrator(
+                session=session,
+                runtime_state=runtime_state,
+                provider_registry=registry,
+                broker=PolicyDrivenBroker(registry, health),
+                health_service=health,
+                adapter_factory=adapter_factory,
+                context_manager=context_manager,
+                context_composer=DefaultContextComposer(
+                    context_manager,
+                    session,
+                    runtime_state,
+                    ProjectManifest(project_id="temp-json-envelope"),
+                ),
+                event_bus=EventBus(sinks=[]),
+            )
+
+            async def run():
+                return await orchestrator.handle_line("Ответь кратко")
+
+            result = asyncio.run(run())
+            self.assertTrue(result.is_error)
+            self.assertIn("invalid for the JSON protocol", result.output or "")
+
     def test_apply_shortcut_uses_last_user_request(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -371,12 +405,15 @@ class ExecutionRuntimeTest(unittest.TestCase):
                 [
                     json.dumps(
                         {
-                            "action": "answer",
-                            "answer": "Нужно ли мне начать реализацию этих изменений в коде?",
+                            "type": "ask",
+                            "message": "Нужно ли мне начать реализацию этих изменений в коде?",
+                            "requested_action": {"kind": "apply_last_prompt", "label": "Apply changes"},
                         }
                     ),
                     json.dumps(
                         {
+                            "type": "edit_plan",
+                            "message": "Apply shortcut",
                             "edits": [
                                 {
                                     "path": "notes.txt",
@@ -433,12 +470,15 @@ class ExecutionRuntimeTest(unittest.TestCase):
                 [
                     json.dumps(
                         {
-                            "action": "answer",
-                            "answer": "Нужно ли мне начать реализацию этих изменений в коде?",
+                            "type": "ask",
+                            "message": "Нужно ли мне начать реализацию этих изменений в коде?",
+                            "requested_action": {"kind": "apply_last_prompt", "label": "Apply changes"},
                         }
                     ),
                     json.dumps(
                         {
+                            "type": "edit_plan",
+                            "message": "Apply affirmative shortcut",
                             "edits": [
                                 {
                                     "path": "notes.txt",

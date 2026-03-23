@@ -7,27 +7,11 @@ import re
 from ..context.manager import ContextManager
 from ..domain.enums import TaskTag
 from ..domain.models import ChatMessage, ChatRequest
+from ..domain.response_protocol import AUTOEDIT_RESPONSE_SCHEMA
 from ..execution.editing import EditOperation, EditPlan, StructuredEditParser
 from .models import PlannerOutput
 
-AUTOEDIT_SYSTEM_PROMPT = """Return only JSON with exact text replacements.
-Schema:
-{
-  "edits": [
-    {
-      "path": "relative/path.py",
-      "old": "exact existing text",
-      "new": "replacement text",
-      "reason": "short explanation"
-    }
-  ]
-}
-Rules:
-- edit only active files provided in context
-- each file may appear at most once
-- use exact snippets that exist exactly once
-- do not include markdown, prose, or code fences unless the entire response is a json code fence
-"""
+AUTOEDIT_SYSTEM_PROMPT = AUTOEDIT_RESPONSE_SCHEMA
 
 _CHANGE_PATTERNS = (
     re.compile(r'change\s+"([^"]+)"\s+to\s+"([^"]+)"', re.IGNORECASE),
@@ -69,6 +53,7 @@ class CoderAgent:
             task_tag=task_tag,
             model_hint=model_hint,
             max_output_tokens=1400,
+            json_mode=True,
             metadata={"mode": "autoedit", "agent_role": "coder"},
         )
 

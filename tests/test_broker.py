@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import unittest
@@ -45,7 +46,10 @@ class HealthyFailingAdapter:
             prompt = request.messages[-1].content
             from codecore.domain.models import ChatResult
 
-            return ChatResult(text=f"[mock:{self._route.alias}] {prompt}", latency_ms=7)
+            text = f"[mock:{self._route.alias}] retry please"
+            if request.json_mode:
+                text = json.dumps({"type": "final", "message": text})
+            return ChatResult(text=text, latency_ms=7)
         raise RuntimeError(f"simulated failure for {self._route.provider_id}")
 
     async def stream(self, request):

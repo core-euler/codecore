@@ -22,6 +22,7 @@ class ChatRequest:
     task_tag: TaskTag = TaskTag.GENERAL
     model_hint: str | None = None
     max_output_tokens: int | None = None
+    json_mode: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

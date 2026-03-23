@@ -51,6 +51,7 @@ class LiteLLMAdapter:
             messages=messages,
             api_base=self._route.base_url,
             api_key=api_key,
+            response_format={"type": "json_object"} if request.json_mode and self._route.supports_json else None,
         )
         latency_ms = int((perf_counter() - started) * 1000)
 

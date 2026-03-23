@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 
@@ -12,6 +11,7 @@ from ..domain.contracts import ContextComposer, PolicyEngine, SkillRegistry, Too
 from ..domain.enums import EventKind, PolicyAction, RiskLevel, TaskTag
 from ..domain.events import EventEnvelope
 from ..domain.models import ChatMessage, ChatRequest
+from ..domain.response_protocol import AUTOEDIT_RESPONSE_SCHEMA, GENERAL_RESPONSE_SCHEMA, ModelResponseParser
 from ..execution.changesets import ChangeSet, ChangeSetApplier, ChangeSetEntry
 from ..domain.results import PolicyDecision, VerificationResult
 from ..execution.audit import FileChangeAudit
@@ -33,54 +33,7 @@ from ..providers.registry import ProviderRegistry
 from ..telemetry.analytics import TelemetryAnalytics
 from ..ui.commands import HELP_TEXT
 
-AUTOEDIT_SYSTEM_PROMPT = """Return only JSON with exact text replacements.
-Schema:
-{
-  "edits": [
-    {
-      "path": "relative/path.py",
-      "old": "exact existing text",
-      "new": "replacement text",
-      "reason": "short explanation"
-    }
-  ]
-}
-Rules:
-- edit only active files provided in context
-- each file may appear at most once
-- use exact snippets that exist exactly once
-- do not include markdown, prose, or code fences unless the entire response is a json code fence
-"""
-
-TOOL_LOOP_SYSTEM_PROMPT = """You are CodeCore's native repository inspection controller.
-You can either answer the user directly or request exactly one built-in tool.
-
-Available tools:
-- list {"path": ".", "max_entries": 80}
-- search {"query": "...", "path": ".", "max_matches": 20}
-- read {"path": "relative/file.py", "start_line": 1, "end_line": 200}
-- repo_map {"max_depth": 4}
-
-Return exactly one JSON object and nothing else:
-{"action": "tool", "tool": "search", "args": {"query": "psychotype", "path": "bot"}, "message": "Searching bot files for psychotype flow."}
-or
-{"action": "answer", "answer": "final markdown answer"}
-
-Rules:
-- Prefer search/list before read when the exact file is unknown.
-- Read only the minimum amount of content needed to answer accurately.
-- After you have enough evidence, return action=answer immediately in the user's language.
-- Never emit shell commands, Python snippets, pseudo-tool calls, or markdown fences.
-- Do not stop after a tool request; keep using tools until you can answer.
-"""
-
-_TOOL_LOOP_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*\})\s*```", re.DOTALL)
-_TOOL_LOOP_HINT_RE = re.compile(
-    r"(?:[/\\][\w.\-]+|\b\w+\.(?:py|md|js|ts|tsx|json|yaml|yml|txt|go|rs)\b|"
-    r"\b(?:file|files|repo|repository|code|function|class|module|handler|state|workflow|scenario|message|messages)\b|"
-    r"\b(?:файл|файлы|код|репозитор|сценар|сообщен|обработчик|состояни|найди|прочитай|посмотри|где)\b)",
-    re.IGNORECASE,
-)
+AUTOEDIT_SYSTEM_PROMPT = AUTOEDIT_RESPONSE_SCHEMA
 _FOLLOW_UP_CONFIRM_RE = re.compile(
     r"^(?:1|да|ага|угу|ок|окей|yes|yep|yeah|go|делай|применяй|запускай|начинай|погнали)\b",
     re.IGNORECASE,
@@ -110,6 +63,7 @@ class Orchestrator:
     approval_manager: ApprovalManager | None = None
     verification_engine: VerificationEngine | None = None
     edit_parser: StructuredEditParser = field(default_factory=StructuredEditParser)
+    response_parser: ModelResponseParser = field(default_factory=ModelResponseParser)
     command_router: CommandRouter = field(init=False)
 
     def __post_init__(self) -> None:
@@ -180,16 +134,7 @@ class Orchestrator:
         turn = new_turn_context(prompt)
         self.session.last_user_prompt = prompt
         self.session.pending_follow_up_action = None
-        if self._should_use_native_tool_loop(prompt):
-            return await self._run_native_tool_loop(prompt, turn_id=turn.turn_id)
-        request = ChatRequest(
-            messages=(ChatMessage(role="user", content=prompt),),
-            task_tag=self.session.task_tag,
-            model_hint=self.runtime_state.manual_model_alias,
-        )
-        request = await self.context_composer.compose(request)
-        self._update_context_metrics(request)
-        return await self._invoke_request(prompt, request, turn_id=turn.turn_id)
+        return await self._run_response_loop(prompt, turn_id=turn.turn_id)
 
     async def _invoke_request(
         self,
@@ -287,17 +232,13 @@ class Orchestrator:
                     },
                 )
             )
-            self._update_pending_follow_up_action(result.text)
             return CommandResult(output=result.text, render_mode=render_mode)
 
         if last_error is None:
             return CommandResult(output="No provider routes were available for invocation.", is_error=True)
         return CommandResult(output=f"All provider routes failed: {last_error}", is_error=True)
 
-    async def _run_native_tool_loop(self, prompt: str, *, turn_id: str) -> CommandResult:
-        if self.native_tool_executor is None:
-            return await self._invoke_direct_prompt(prompt, turn_id=turn_id)
-
+    async def _run_response_loop(self, prompt: str, *, turn_id: str) -> CommandResult:
         observations: list[str] = []
         max_steps = 4
         for step in range(max_steps):
@@ -305,73 +246,54 @@ class Orchestrator:
                 messages=(
                     ChatMessage(
                         role="user",
-                        content=self._build_tool_loop_user_prompt(prompt, observations, step=step + 1, max_steps=max_steps),
+                        content=self._build_response_loop_user_prompt(prompt, observations, step=step + 1, max_steps=max_steps),
                     ),
                 ),
-                system_prompt=TOOL_LOOP_SYSTEM_PROMPT,
+                system_prompt=GENERAL_RESPONSE_SCHEMA,
                 task_tag=self.session.task_tag,
                 model_hint=self.runtime_state.manual_model_alias,
                 max_output_tokens=900,
-                metadata={"mode": "tool-loop", "step": step + 1},
+                json_mode=True,
+                metadata={"mode": "response-loop", "step": step + 1},
             )
             request = await self.context_composer.compose(request)
             self._update_context_metrics(request)
-            result = await self._invoke_request(f"tool-loop: {prompt}", request, turn_id=turn_id, render_mode="text")
+            result = await self._invoke_request(f"response-loop: {prompt}", request, turn_id=turn_id, render_mode="text")
             if result.is_error:
                 return result
-            decision = self._parse_tool_loop_response(result.output)
-            if decision is None:
-                if step == 0:
-                    return await self._invoke_direct_prompt(prompt, turn_id=turn_id)
+            try:
+                envelope = self.response_parser.parse(result.output, allowed_types=("final", "ask", "tool_call"))
+            except ValueError as exc:
+                message = (
+                    f"Model response is invalid for the JSON protocol: {exc}\n"
+                    f"Raw response:\n{summarize_output(result.output or '', max_chars=800).rendered}"
+                )
+                self._remember_failure("response-loop", prompt, message)
+                return CommandResult(output=message, is_error=True)
+            if envelope.response_type in {"final", "ask"}:
+                self.session.pending_follow_up_action = (
+                    envelope.requested_action.kind if envelope.requested_action is not None else None
+                )
+                return CommandResult(output=envelope.message, render_mode="markdown")
+            if envelope.tool_call is None:
                 break
-            if decision.get("action") == "answer":
-                answer = decision.get("answer")
-                if isinstance(answer, str) and answer.strip():
-                    self._update_pending_follow_up_action(answer)
-                    return CommandResult(output=answer.strip(), render_mode="markdown")
-                break
-            if decision.get("action") != "tool":
-                break
-            tool = decision.get("tool")
-            args = decision.get("args", {})
-            message = decision.get("message", "")
-            if not isinstance(tool, str) or not isinstance(args, dict):
-                break
+            if self.native_tool_executor is None:
+                return CommandResult(output="Native tool call requested, but no native tool executor is configured.", is_error=True)
             execution = await self._execute_native_tool(
-                NativeToolCall(tool=tool, args=args, message=message if isinstance(message, str) else "")
+                NativeToolCall(
+                    tool=envelope.tool_call.name,
+                    args=envelope.tool_call.args,
+                    message=envelope.message,
+                )
             )
             if execution.exit_code != 0:
-                observations.append(f"{tool} failed: {execution.stderr}")
+                observations.append(f"{envelope.tool_call.name} failed: {execution.stderr}")
                 break
             observations.append(execution.stdout)
 
-        fallback_request = ChatRequest(
-            messages=(
-                ChatMessage(
-                    role="user",
-                    content=(
-                        f"User request:\n{prompt}\n\n"
-                        "You now have enough gathered repository observations. "
-                        "Respond with the final answer only."
-                    ),
-                ),
-            ),
-            task_tag=self.session.task_tag,
-            model_hint=self.runtime_state.manual_model_alias,
-        )
-        fallback_request = await self.context_composer.compose(fallback_request)
-        self._update_context_metrics(fallback_request)
-        return await self._invoke_request(prompt, fallback_request, turn_id=turn_id)
-
-    async def _invoke_direct_prompt(self, prompt: str, *, turn_id: str) -> CommandResult:
-        request = ChatRequest(
-            messages=(ChatMessage(role="user", content=prompt),),
-            task_tag=self.session.task_tag,
-            model_hint=self.runtime_state.manual_model_alias,
-        )
-        request = await self.context_composer.compose(request)
-        self._update_context_metrics(request)
-        return await self._invoke_request(prompt, request, turn_id=turn_id)
+        message = "Model did not produce a final JSON answer within the response loop budget."
+        self._remember_failure("response-loop", prompt, message)
+        return CommandResult(output=message, is_error=True)
 
     async def _execute_native_tool(self, call: NativeToolCall):
         execution = self.native_tool_executor.execute(call)
@@ -408,37 +330,21 @@ class Orchestrator:
             self._remember_tool_output(title, summary)
         return execution
 
-    def _should_use_native_tool_loop(self, prompt: str) -> bool:
-        if self.native_tool_executor is None:
-            return False
-        if self.runtime_state.manual_model_alias == "mock":
-            return False
-        if self.session.active_files:
-            return True
-        return bool(_TOOL_LOOP_HINT_RE.search(prompt))
-
-    def _build_tool_loop_user_prompt(self, prompt: str, observations: list[str], *, step: int, max_steps: int) -> str:
+    def _build_response_loop_user_prompt(self, prompt: str, observations: list[str], *, step: int, max_steps: int) -> str:
         lines = [f"User request:\n{prompt}", f"Current step: {step}/{max_steps}."]
+        if self.native_tool_executor is not None:
+            lines.append(
+                "Available built-in tools:\n"
+                '- list {"path": ".", "max_entries": 80}\n'
+                '- search {"query": "...", "path": ".", "max_matches": 20}\n'
+                '- read {"path": "relative/file.py", "start_line": 1, "end_line": 200}\n'
+                '- repo_map {"max_depth": 4}'
+            )
         if observations:
             lines.append("Tool observations gathered so far:\n" + "\n\n".join(observations[-3:]))
         if step == max_steps:
-            lines.append("This is the final step. Return action=answer.")
+            lines.append("This is the final step. Return type=final or type=ask, not tool_call.")
         return "\n\n".join(lines)
-
-    def _parse_tool_loop_response(self, text: str) -> dict[str, object] | None:
-        raw = text.strip()
-        if not raw:
-            return None
-        match = _TOOL_LOOP_JSON_RE.search(raw)
-        if match:
-            raw = match.group(1)
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            return None
-        if not isinstance(parsed, dict):
-            return None
-        return parsed
 
     def _native_tool_title(self, call: NativeToolCall, execution) -> str:
         path = execution.metadata.get("path")
@@ -699,6 +605,7 @@ class Orchestrator:
             task_tag=self.session.task_tag,
             model_hint=self.runtime_state.manual_model_alias,
             max_output_tokens=1200,
+            json_mode=True,
             metadata={"mode": "autoedit"},
         )
         request = await self.context_composer.compose(request)
@@ -1518,24 +1425,6 @@ class Orchestrator:
         if len(compact) <= limit:
             return compact
         return compact[: limit - 3] + "..."
-
-    def _update_pending_follow_up_action(self, response_text: str) -> None:
-        normalized = response_text.lower()
-        if any(
-            phrase in normalized
-            for phrase in (
-                "нужно ли мне начать",
-                "начать реализац",
-                "применять изменения",
-                "приступить к реализации",
-                "should i start",
-                "should i implement",
-                "apply these changes",
-            )
-        ):
-            self.session.pending_follow_up_action = "apply_last_prompt"
-            return
-        self.session.pending_follow_up_action = None
 
     @staticmethod
     def _is_apply_follow_up(text: str) -> bool:

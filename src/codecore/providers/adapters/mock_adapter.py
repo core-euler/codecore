@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 from ...domain.models import ChatRequest, ChatResult, HealthStatus, ProviderRoute
@@ -15,8 +16,11 @@ class MockModelAdapter:
         self._route = route
 
     async def chat(self, request: ChatRequest) -> ChatResult:
-        prompt = request.messages[-1].content if request.messages else ""
-        text = f"[mock:{self._route.alias or self._route.model_id}] {prompt}"
+        prompt = self._extract_prompt(request)
+        if request.json_mode:
+            text = json.dumps({"type": "final", "message": f"[mock:{self._route.alias or self._route.model_id}] {prompt}"})
+        else:
+            text = f"[mock:{self._route.alias or self._route.model_id}] {prompt}"
         input_tokens = max(1, len(prompt) // 4)
         output_tokens = max(1, len(text) // 4)
         return ChatResult(
@@ -42,3 +46,14 @@ class MockModelAdapter:
 
     def capabilities(self):
         return route_capabilities(self._route)
+
+    @staticmethod
+    def _extract_prompt(request: ChatRequest) -> str:
+        if not request.messages:
+            return ""
+        content = request.messages[-1].content
+        marker = "User request:\n"
+        if marker in content:
+            after = content.split(marker, 1)[1]
+            return after.split("\n\n", 1)[0].strip()
+        return content

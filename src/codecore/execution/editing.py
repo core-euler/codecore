@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
+from ..domain.response_protocol import ModelResponseParser
+
 
 @dataclass(slots=True, frozen=True)
 class EditOperation:
@@ -21,6 +23,9 @@ class EditPlan:
 
 
 class StructuredEditParser:
+    def __init__(self) -> None:
+        self._response_parser = ModelResponseParser()
+
     def parse(self, text: str, *, allowed_paths: tuple[str, ...]) -> EditPlan:
         payload = self._load_payload(text)
         edits_payload = payload.get("edits")
@@ -56,6 +61,13 @@ class StructuredEditParser:
         return EditPlan(edits=tuple(edits), raw_response=text)
 
     def _load_payload(self, text: str) -> dict:
+        try:
+            envelope = self._response_parser.parse(text, allowed_types=("edit_plan",))
+            if envelope.edits:
+                return {"type": "edit_plan", "message": envelope.message, "edits": list(envelope.edits)}
+        except ValueError:
+            pass
+
         candidate = text.strip()
         if candidate.startswith("```"):
             lines = candidate.splitlines()
