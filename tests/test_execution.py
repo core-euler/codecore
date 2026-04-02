@@ -686,6 +686,23 @@ class ExecutionRuntimeTest(unittest.TestCase):
             self.assertIn("Restored tracked files: README.md", restore_text)
             self.assertEqual(readme.read_text(encoding="utf-8"), "initial\n")
 
+    def test_git_workspace_change_stats_reports_modified_and_untracked(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            init_git_repo(temp_path)
+            readme = temp_path / "README.md"
+            readme.write_text("initial\nchanged\n", encoding="utf-8")
+            notes = temp_path / "notes.txt"
+            notes.write_text("new\n", encoding="utf-8")
+            workspace = GitWorkspace(temp_path)
+
+            stats = workspace.change_stats()
+            by_path = {item.path: item for item in stats}
+
+            self.assertEqual(by_path["README.md"].status, "modified")
+            self.assertGreaterEqual(by_path["README.md"].added, 1)
+            self.assertEqual(by_path["notes.txt"].status, "untracked")
+
     def test_workspace_files_and_patch_service(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

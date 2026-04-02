@@ -14,6 +14,14 @@ class GitCommandResult:
     stderr: str = ""
 
 
+@dataclass(slots=True, frozen=True)
+class FileChangeStat:
+    path: str
+    status: str
+    added: int
+    removed: int
+
+
 class GitWorkspace:
     def __init__(self, root: Path) -> None:
         self._root = root.resolve()
@@ -81,6 +89,56 @@ class GitWorkspace:
             return ()
         status = self._run("status", "--short", "--untracked-files=all")
         return tuple(line[3:].strip() for line in status.stdout.splitlines() if line.startswith("?? "))
+
+    def change_stats(self, paths: tuple[str, ...] = ()) -> tuple[FileChangeStat, ...]:
+        if not self.is_repository():
+            return ()
+        status_result = self._run("status", "--short", "--untracked-files=all")
+        status_map: dict[str, str] = {}
+        for line in status_result.stdout.splitlines():
+            if not line.strip():
+                continue
+            code = line[:2]
+            path = line[3:].strip()
+            if paths and path not in paths:
+                continue
+            status_map[path] = self._normalize_status(code)
+
+        numstats: dict[str, tuple[int, int]] = {}
+        for args in (("diff", "--numstat", "--no-ext-diff"), ("diff", "--cached", "--numstat", "--no-ext-diff")):
+            result = self._run(*args)
+            for line in result.stdout.splitlines():
+                parts = line.split("\t")
+                if len(parts) != 3:
+                    continue
+                added_text, removed_text, path = parts
+                if paths and path not in paths:
+                    continue
+                added = 0 if added_text == "-" else int(added_text)
+                removed = 0 if removed_text == "-" else int(removed_text)
+                prev_added, prev_removed = numstats.get(path, (0, 0))
+                numstats[path] = (prev_added + added, prev_removed + removed)
+
+        stats: list[FileChangeStat] = []
+        for path in sorted(status_map):
+            added, removed = numstats.get(path, (0, 0))
+            stats.append(FileChangeStat(path=path, status=status_map[path], added=added, removed=removed))
+        return tuple(stats)
+
+    @staticmethod
+    def _normalize_status(code: str) -> str:
+        stripped = code.strip()
+        if stripped == "??":
+            return "untracked"
+        if "R" in code:
+            return "renamed"
+        if "D" in code:
+            return "deleted"
+        if "A" in code:
+            return "added"
+        if "M" in code:
+            return "modified"
+        return stripped.lower() or "changed"
 
     def _run(self, *args: str) -> GitCommandResult:
         proc = subprocess.run(

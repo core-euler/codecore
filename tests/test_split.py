@@ -26,6 +26,7 @@ class _StubOrchestrator:
         self.runtime_state = RuntimeState.default()
         self.approval_manager = None
         self.context_manager = SimpleNamespace(project_root=ROOT)
+        self.git_workspace = None
         self.calls: list[str] = []
 
     async def start(self) -> None:
@@ -44,11 +45,29 @@ class _StubOrchestrator:
         return CommandResult(output=f"{self.role}: {line}", render_mode="markdown")
 
 
+class _FakeGitWorkspace:
+    def is_repository(self) -> bool:
+        return True
+
+    def changed_files(self) -> tuple[str, ...]:
+        return ("src/auth.py", "src/routes.py")
+
+    def change_stats(self, paths: tuple[str, ...] = ()):
+        stats = (
+            SimpleNamespace(path="src/auth.py", status="added", added=24, removed=0),
+            SimpleNamespace(path="src/routes.py", status="modified", added=5, removed=1),
+        )
+        if not paths:
+            return stats
+        return tuple(item for item in stats if item.path in paths)
+
+
 class SplitCoordinatorTest(unittest.TestCase):
     def test_send_uses_last_architect_message_and_records_hook(self) -> None:
         architect = _StubOrchestrator("architect")
         architect.session.transcript.append(SimpleNamespace(role="assistant", content="Implement auth middleware"))
         executor = _StubOrchestrator("executor")
+        executor.git_workspace = _FakeGitWorkspace()
         coordinator = SplitCoordinator(
             architect=SplitRoleRuntime(role="architect", orchestrator=architect),
             executor=SplitRoleRuntime(role="executor", orchestrator=executor),
@@ -64,6 +83,7 @@ class SplitCoordinatorTest(unittest.TestCase):
         self.assertIn("Default mode is incremental", executor.calls[0])
         self.assertIsNotNone(coordinator.last_hook)
         self.assertIn('"status": "complete"', coordinator.last_hook)
+        self.assertIn('"file_stats"', coordinator.last_hook)
         self.assertEqual(coordinator.active_role, "architect")
 
     def test_mode_switch_changes_executor_prompt(self) -> None:
@@ -76,6 +96,7 @@ class SplitCoordinatorTest(unittest.TestCase):
                 "snippet": "Use lifespan for startup and shutdown logic.",
             }
         )
+        architect.session.active_files = ["src/auth.py", "src/routes.py"]
         executor = _StubOrchestrator("executor")
         coordinator = SplitCoordinator(
             architect=SplitRoleRuntime(role="architect", orchestrator=architect),
@@ -93,8 +114,11 @@ class SplitCoordinatorTest(unittest.TestCase):
         self.assertEqual(coordinator.execution_mode, "rebuild")
         self.assertIn("Source of truth: documentation, tests, and verified facts from Architect.", executor.calls[0])
         self.assertIn("## Verified Facts", executor.calls[0])
+        self.assertIn("## Allowed Files", executor.calls[0])
+        self.assertIn("src/auth.py", executor.calls[0])
         self.assertIn("https://fastapi.tiangolo.com/", executor.calls[0])
         self.assertIn('"mode": "rebuild"', send_result.output)
+        self.assertEqual(executor.session.active_files, ["src/auth.py", "src/routes.py"])
 
     def test_render_overview_includes_mode(self) -> None:
         coordinator = SplitCoordinator(

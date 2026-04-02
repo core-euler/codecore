@@ -212,11 +212,16 @@ class SplitCoordinator:
         after: tuple[str, ...],
     ) -> None:
         executor = self.executor.orchestrator
+        stats = self._workspace_stats(after)
         payload = {
             "status": "error" if result.is_error else "complete",
             "mode": self.execution_mode,
             "files_changed": list(after),
             "files_created": [path for path in after if path not in before],
+            "file_stats": [
+                {"path": item["path"], "status": item["status"], "added": item["added"], "removed": item["removed"]}
+                for item in stats
+            ],
             "summary": summarize_output(result.output or "<no output>", max_chars=220).rendered,
             "errors": [result.output] if result.is_error and result.output else [],
             "tokens_used": executor.session.last_context_token_count,
@@ -236,10 +241,25 @@ class SplitCoordinator:
             return tuple(sorted(git_workspace.changed_files()))
         return tuple(sorted(self.executor.orchestrator.session.active_files))
 
+    def _workspace_stats(self, paths: tuple[str, ...]) -> tuple[dict[str, int | str], ...]:
+        git_workspace: GitWorkspace | None = getattr(self.executor.orchestrator, "git_workspace", None)
+        if git_workspace is not None and git_workspace.is_repository():
+            return tuple(
+                {
+                    "path": item.path,
+                    "status": item.status,
+                    "added": item.added,
+                    "removed": item.removed,
+                }
+                for item in git_workspace.change_stats(paths)
+            )
+        return tuple({"path": path, "status": "changed", "added": 0, "removed": 0} for path in paths)
+
     def _compose_executor_prompt(self, payload: str) -> str:
         verified = self._verified_facts_block()
+        scope = self._scope_block()
         if "## Task" in payload or "## Задача" in payload:
-            return self._prepend_mode_rules(payload, verified=verified)
+            return self._prepend_mode_rules(payload, verified=verified, scope=scope)
         return "\n".join(
             (
                 "## Task",
@@ -250,16 +270,38 @@ class SplitCoordinator:
                 "",
                 *verified,
                 "",
+                *scope,
+                "",
                 *self._mode_rules(),
             )
         )
 
-    def _prepend_mode_rules(self, payload: str, *, verified: tuple[str, ...]) -> str:
+    def _prepend_mode_rules(self, payload: str, *, verified: tuple[str, ...], scope: tuple[str, ...]) -> str:
         sections = ["## Execution Mode", f"- {self.execution_mode}", ""]
         if verified:
             sections.extend((*verified, ""))
+        if scope:
+            sections.extend((*scope, ""))
         sections.extend((*self._mode_rules(), "", payload))
         return "\n".join(sections)
+
+    def _scope_block(self) -> tuple[str, ...]:
+        active_files = tuple(self.architect.orchestrator.session.active_files)
+        if not active_files:
+            return ()
+        executor = self.executor.orchestrator
+        executor.session.active_files = list(active_files)
+        executor.runtime_state.active_files = list(active_files)
+        lines = ["## Allowed Files"]
+        lines.extend(f"- {path}" for path in active_files)
+        lines.extend(
+            (
+                "",
+                "## Forbidden",
+                "- Do not modify files outside the allowed list unless Architect explicitly expands the scope.",
+            )
+        )
+        return tuple(lines)
 
     def _verified_facts_block(self) -> tuple[str, ...]:
         proofs = self.architect.orchestrator.session.recent_proofs
