@@ -42,6 +42,8 @@ _COMMAND_OPTIONS: dict[str, tuple[str, ...]] = {
     "replace": ("--verify",),
     "delegate": ("--pipeline", "--verify", "--apply"),
     "benchmark": ("--models", "--pipeline", "--verify"),
+    "research": ("--pipeline", "--verify"),
+    "compare": ("--models", "--pipeline", "--verify"),
 }
 
 _CTX_ACTIONS = ("show", "edit", "trim", "clear", "save", "load")
@@ -155,6 +157,9 @@ class SlashCommandCompleter(Completer):
             yield from self._yield_values(("architect", "executor"), current_token, meta="split role")
         elif command == "mode" and arg_index == 0:
             yield from self._yield_values(("incremental", "rebuild"), current_token, meta="split mode")
+        elif command == "review":
+            candidates = self._active_file_candidates() or self._workspace_file_candidates(current_token)
+            yield from self._yield_values(candidates, current_token, meta="path")
 
     @staticmethod
     def _yield_values(values: tuple[str, ...], current_token: str, *, meta: str):

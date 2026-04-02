@@ -61,6 +61,10 @@ class _FakeGitWorkspace:
             return stats
         return tuple(item for item in stats if item.path in paths)
 
+    def diff_summary(self, paths: tuple[str, ...] = ()) -> str:
+        scoped = ", ".join(paths or self.changed_files())
+        return f"diff for {scoped}"
+
 
 class SplitCoordinatorTest(unittest.TestCase):
     def test_send_uses_last_architect_message_and_records_hook(self) -> None:
@@ -205,6 +209,57 @@ class SplitCoordinatorTest(unittest.TestCase):
 
         self.assertTrue(result.is_error)
         self.assertIn("reserved for Architect", result.output)
+
+    def test_research_routes_through_delegate_pipeline(self) -> None:
+        architect = _StubOrchestrator("architect")
+        architect.session.active_files = ["src/auth.py"]
+        coordinator = SplitCoordinator(
+            architect=SplitRoleRuntime(role="architect", orchestrator=architect),
+            executor=SplitRoleRuntime(role="executor", orchestrator=_StubOrchestrator("executor")),
+        )
+
+        async def run():
+            return await coordinator.handle_line("/research map auth flow")
+
+        result = asyncio.run(run())
+
+        self.assertIn("[architect] architect: /delegate --pipeline planner-coder-reviewer map auth flow", result.output)
+        self.assertEqual(architect.calls[-1], "/delegate --pipeline planner-coder-reviewer map auth flow")
+
+    def test_compare_routes_through_benchmark_pipeline(self) -> None:
+        architect = _StubOrchestrator("architect")
+        architect.session.active_files = ["src/auth.py"]
+        coordinator = SplitCoordinator(
+            architect=SplitRoleRuntime(role="architect", orchestrator=architect),
+            executor=SplitRoleRuntime(role="executor", orchestrator=_StubOrchestrator("executor")),
+        )
+
+        async def run():
+            return await coordinator.handle_line("/compare --models ds-v3,codestral auth flow")
+
+        result = asyncio.run(run())
+
+        self.assertIn("/benchmark --pipeline planner-coder-reviewer --models ds-v3,codestral auth flow", architect.calls[-1])
+        self.assertIn("[architect]", result.output)
+
+    def test_review_returns_latest_hook_and_diff(self) -> None:
+        architect = _StubOrchestrator("architect")
+        executor = _StubOrchestrator("executor")
+        executor.git_workspace = _FakeGitWorkspace()
+        executor.session.active_files = ["src/auth.py", "src/routes.py"]
+        coordinator = SplitCoordinator(
+            architect=SplitRoleRuntime(role="architect", orchestrator=architect),
+            executor=SplitRoleRuntime(role="executor", orchestrator=executor),
+        )
+        coordinator.last_hook = "[hook] Executor completed"
+
+        async def run():
+            return await coordinator.handle_line("/review")
+
+        result = asyncio.run(run())
+
+        self.assertIn("[hook] Executor completed", result.output)
+        self.assertIn("diff for src/auth.py, src/routes.py", result.output)
 
 
 class SplitEntryPointSmokeTest(unittest.TestCase):

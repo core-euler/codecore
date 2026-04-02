@@ -200,6 +200,7 @@ class ReplCompletionTest(unittest.TestCase):
             command_specs=(
                 SimpleNamespace(name="focus", description="split focus"),
                 SimpleNamespace(name="mode", description="split mode"),
+                SimpleNamespace(name="research", description="split research"),
             ),
             provider_registry=SimpleNamespace(list_registered=lambda: ()),
             skill_registry=None,
@@ -213,6 +214,22 @@ class ReplCompletionTest(unittest.TestCase):
 
         texts = {completion.text for completion in completions}
         self.assertIn("mode", texts)
+
+    def test_slash_command_completer_suggests_review_paths(self) -> None:
+        completer = SlashCommandCompleter(SimpleNamespace(
+            command_specs=(),
+            provider_registry=SimpleNamespace(list_registered=lambda: ()),
+            skill_registry=None,
+            approval_manager=None,
+            multi_agent_runner=None,
+            session=SimpleNamespace(active_files=["src/auth.py"]),
+            context_manager=SimpleNamespace(project_root=ROOT),
+        ))
+
+        completions = list(completer.get_completions(Document("/review s"), None))
+
+        texts = {completion.text for completion in completions}
+        self.assertIn("src/auth.py", texts)
 
 
 class _GateOrchestrator:

@@ -39,7 +39,7 @@ from .ui.statusbar import build_status_line
 
 SplitMode = Literal["incremental", "rebuild"]
 
-_SPLIT_GLOBAL_COMMANDS = {"/focus", "/send", "/split", "/roles", "/mode"}
+_SPLIT_GLOBAL_COMMANDS = {"/focus", "/send", "/split", "/roles", "/mode", "/research", "/compare", "/review"}
 _ARCHITECT_BLOCKED_PREFIXES = (
     "/apply",
     "/autoedit",
@@ -63,6 +63,9 @@ _SPLIT_COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec("roles", "/roles", "Show Architect/Executor split overview"),
     CommandSpec("split", "/split", "Alias for /roles"),
     CommandSpec("mode", "/mode [incremental|rebuild]", "Show or change Architect/Executor execution mode"),
+    CommandSpec("research", "/research [--pipeline <id>] [--verify] <instruction>", "Run an isolated multi-agent research workflow for Architect"),
+    CommandSpec("compare", "/compare [--models a,b] [--pipeline <id>] [--verify] <instruction>", "Benchmark Architect's task across multiple model aliases"),
+    CommandSpec("review", "/review [paths...]", "Show git diff summary for Executor's latest change scope"),
 )
 
 
@@ -186,6 +189,12 @@ class SplitCoordinator:
                 render_mode="markdown" if self.last_hook else result.render_mode,
                 should_exit=result.should_exit,
             )
+        if line.startswith("/research"):
+            return await self._handle_research_command(line)
+        if line.startswith("/compare"):
+            return await self._handle_compare_command(line)
+        if line.startswith("/review"):
+            return await self._handle_review_command(line)
         return CommandResult(output=f"Unknown split command: {line}", is_error=True)
 
     def render_overview(self) -> str:
@@ -234,6 +243,44 @@ class SplitCoordinator:
         self.last_hook = hook
         self.architect.orchestrator.session.transcript.append(ChatMessage(role="hook", content=hook))
         self._remember_system_event("architect", hook)
+
+    async def _handle_research_command(self, line: str) -> CommandResult:
+        if self.active_role != "architect":
+            return CommandResult(output="`/research` is only available while focused on architect.", is_error=True)
+        delegate_args = line.removeprefix("/research").strip()
+        if not delegate_args:
+            return CommandResult(output="Usage: /research [--pipeline <id>] [--verify] <instruction>", is_error=True)
+        command = "/delegate " + self._ensure_pipeline(delegate_args, default_pipeline="planner-coder-reviewer")
+        result = await self.architect.orchestrator.handle_line(command)
+        self._remember_architect_summary("research", result)
+        return self._prefix_result("architect", result)
+
+    async def _handle_compare_command(self, line: str) -> CommandResult:
+        if self.active_role != "architect":
+            return CommandResult(output="`/compare` is only available while focused on architect.", is_error=True)
+        benchmark_args = line.removeprefix("/compare").strip()
+        if not benchmark_args:
+            return CommandResult(output="Usage: /compare [--models a,b] [--pipeline <id>] [--verify] <instruction>", is_error=True)
+        command = "/benchmark " + self._ensure_pipeline(benchmark_args, default_pipeline="planner-coder-reviewer")
+        result = await self.architect.orchestrator.handle_line(command)
+        self._remember_architect_summary("compare", result)
+        return self._prefix_result("architect", result)
+
+    async def _handle_review_command(self, line: str) -> CommandResult:
+        if self.active_role != "architect":
+            return CommandResult(output="`/review` is only available while focused on architect.", is_error=True)
+        args = line.split()[1:]
+        git_workspace: GitWorkspace | None = getattr(self.executor.orchestrator, "git_workspace", None)
+        if git_workspace is None:
+            return CommandResult(output="Executor git workspace is not configured.", is_error=True)
+        paths = tuple(args) if args else tuple(self.executor.orchestrator.session.active_files)
+        diff = git_workspace.diff_summary(paths)
+        if self.last_hook:
+            output = self.last_hook + "\n\n" + diff
+        else:
+            output = diff
+        self._remember_system_event("architect", output)
+        return CommandResult(output=output, render_mode="markdown")
 
     def _workspace_snapshot(self) -> tuple[str, ...]:
         git_workspace: GitWorkspace | None = getattr(self.executor.orchestrator, "git_workspace", None)
@@ -302,6 +349,20 @@ class SplitCoordinator:
             )
         )
         return tuple(lines)
+
+    @staticmethod
+    def _ensure_pipeline(args: str, *, default_pipeline: str) -> str:
+        if "--pipeline" in args:
+            return args
+        return f"--pipeline {default_pipeline} {args}".strip()
+
+    def _remember_architect_summary(self, label: str, result: CommandResult) -> None:
+        if result.output and not result.is_error:
+            self.architect.orchestrator.session.transcript.append(
+                ChatMessage(role="assistant", content=f"[{label}]\n{result.output}")
+            )
+        if result.output:
+            self._remember_system_event("architect", f"[{label}] {result.output}")
 
     def _verified_facts_block(self) -> tuple[str, ...]:
         proofs = self.architect.orchestrator.session.recent_proofs
