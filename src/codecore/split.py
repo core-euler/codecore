@@ -213,6 +213,26 @@ class SplitCoordinator:
             lines.extend(["", "## Latest Hook", self.last_hook])
         return "\n".join(lines)
 
+    def latest_hook_payload(self) -> dict[str, object] | None:
+        if not self.last_hook:
+            return None
+        marker = "```json"
+        start = self.last_hook.find(marker)
+        if start < 0:
+            return None
+        start += len(marker)
+        end = self.last_hook.find("```", start)
+        if end < 0:
+            return None
+        raw = self.last_hook[start:end].strip()
+        if not raw:
+            return None
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
     def _record_executor_hook(
         self,
         result: CommandResult,
@@ -273,7 +293,7 @@ class SplitCoordinator:
         git_workspace: GitWorkspace | None = getattr(self.executor.orchestrator, "git_workspace", None)
         if git_workspace is None:
             return CommandResult(output="Executor git workspace is not configured.", is_error=True)
-        paths = tuple(args) if args else tuple(self.executor.orchestrator.session.active_files)
+        paths = tuple(args) if args else self._review_scope()
         diff = git_workspace.diff_summary(paths)
         if self.last_hook:
             output = self.last_hook + "\n\n" + diff
@@ -281,6 +301,15 @@ class SplitCoordinator:
             output = diff
         self._remember_system_event("architect", output)
         return CommandResult(output=output, render_mode="markdown")
+
+    def _review_scope(self) -> tuple[str, ...]:
+        payload = self.latest_hook_payload() or {}
+        files_changed = payload.get("files_changed")
+        if isinstance(files_changed, list):
+            scope = tuple(str(item) for item in files_changed if str(item).strip())
+            if scope:
+                return scope
+        return tuple(self.executor.orchestrator.session.active_files)
 
     def _workspace_snapshot(self) -> tuple[str, ...]:
         git_workspace: GitWorkspace | None = getattr(self.executor.orchestrator, "git_workspace", None)
@@ -440,11 +469,14 @@ class SplitCoordinator:
         executor = self.executor.orchestrator.session
         total_cost = architect.total_cost_usd + executor.total_cost_usd
         total_requests = architect.request_count + executor.request_count
-        return (
+        footer = (
             f"session mode={self.execution_mode} | focus={self.active_role} | "
             f"req={total_requests} | cost=${total_cost:.4f} | "
             "Tab switch focus | Enter submit | /send dispatches Architect plan"
         )
+        if self.last_hook:
+            footer += " | hook: Ctrl-R review latest diff | Ctrl-E focus executor"
+        return footer
 
     def _recent_events_for(self, role: str) -> tuple[str, ...]:
         scoped: list[str] = []
@@ -553,6 +585,21 @@ class SplitCodeCoreApp:
         def _interrupt(event) -> None:
             event.app.exit(result=0)
 
+        @key_bindings.add("c-r")
+        def _review_latest(event) -> None:
+            if self._busy:
+                self._refresh_views(message="busy: wait for the current action to finish")
+                return
+            asyncio.create_task(self._run_shortcut("/review", status="reviewing latest executor diff"))
+
+        @key_bindings.add("c-e")
+        def _focus_executor(event) -> None:
+            if self._busy:
+                self._refresh_views(message="busy: wait for the current action to finish")
+                return
+            self.coordinator.active_role = "executor"
+            self._refresh_views(message="focus=executor")
+
         architect_view = TextArea(read_only=True, focusable=False, scrollbar=True, wrap_lines=True, style="class:pane")
         executor_view = TextArea(read_only=True, focusable=False, scrollbar=True, wrap_lines=True, style="class:pane")
         status_view = TextArea(read_only=True, focusable=False, height=1, style="class:status")
@@ -624,6 +671,16 @@ class SplitCodeCoreApp:
             return
         self._busy = True
         self._refresh_views(message=self._status_text(line))
+        result = await self.coordinator.handle_line(line)
+        message = summarize_output(result.output or "ok", max_chars=280).rendered if result.output else "ok"
+        self._busy = False
+        self._refresh_views(message=message)
+        if result.should_exit and self._application is not None:
+            self._application.exit(result=0)
+
+    async def _run_shortcut(self, line: str, *, status: str) -> None:
+        self._busy = True
+        self._refresh_views(message=status)
         result = await self.coordinator.handle_line(line)
         message = summarize_output(result.output or "ok", max_chars=280).rendered if result.output else "ok"
         self._busy = False

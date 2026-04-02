@@ -166,6 +166,18 @@ class SplitCoordinatorTest(unittest.TestCase):
         self.assertIn("req=5", footer)
         self.assertIn("cost=$0.0300", footer)
 
+    def test_render_session_footer_includes_hook_shortcuts(self) -> None:
+        coordinator = SplitCoordinator(
+            architect=SplitRoleRuntime(role="architect", orchestrator=_StubOrchestrator("architect")),
+            executor=SplitRoleRuntime(role="executor", orchestrator=_StubOrchestrator("executor")),
+        )
+        coordinator.last_hook = "[hook] Executor completed\n```json\n{\"files_changed\": [\"src/auth.py\"]}\n```"
+
+        footer = coordinator.render_session_footer()
+
+        self.assertIn("Ctrl-R review latest diff", footer)
+        self.assertIn("Ctrl-E focus executor", footer)
+
     def test_architect_blocks_mutating_commands(self) -> None:
         coordinator = SplitCoordinator(
             architect=SplitRoleRuntime(role="architect", orchestrator=_StubOrchestrator("architect")),
@@ -260,6 +272,30 @@ class SplitCoordinatorTest(unittest.TestCase):
 
         self.assertIn("[hook] Executor completed", result.output)
         self.assertIn("diff for src/auth.py, src/routes.py", result.output)
+
+    def test_review_prefers_hook_changed_files_scope(self) -> None:
+        architect = _StubOrchestrator("architect")
+        executor = _StubOrchestrator("executor")
+        executor.git_workspace = _FakeGitWorkspace()
+        executor.session.active_files = ["src/routes.py"]
+        coordinator = SplitCoordinator(
+            architect=SplitRoleRuntime(role="architect", orchestrator=architect),
+            executor=SplitRoleRuntime(role="executor", orchestrator=executor),
+        )
+        coordinator.last_hook = (
+            "[hook] Executor completed\n"
+            "```json\n"
+            "{\"files_changed\": [\"src/auth.py\"]}\n"
+            "```"
+        )
+
+        async def run():
+            return await coordinator.handle_line("/review")
+
+        result = asyncio.run(run())
+
+        self.assertIn("diff for src/auth.py", result.output)
+        self.assertNotIn("diff for src/routes.py", result.output)
 
 
 class SplitEntryPointSmokeTest(unittest.TestCase):
