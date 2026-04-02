@@ -15,6 +15,7 @@ class SessionRuntime:
     session_id: str
     started_at: datetime
     task_tag: TaskTag = TaskTag.GENERAL
+    transcript: list[ChatMessage] = field(default_factory=list)
     active_files: list[str] = field(default_factory=list)
     active_skills: list[str] = field(default_factory=list)
     request_count: int = 0
@@ -31,6 +32,7 @@ class SessionRuntime:
     last_context_file_count: int = 0
     last_context_token_count: int = 0
     allowed_action_types: list[str] = field(default_factory=list)
+    recent_proofs: list[dict[str, str]] = field(default_factory=list)
     last_user_prompt: str | None = None
     pending_follow_up_action: str | None = None
 

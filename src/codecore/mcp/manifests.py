@@ -9,6 +9,7 @@ class MCPServerManifest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     server_id: str = Field(pattern=r"^[a-z0-9-]+$")
+    enabled: bool = True
     transport: str
     command: str | None = None
     args: list[str] = Field(default_factory=list)

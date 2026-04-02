@@ -17,7 +17,7 @@ Schema:
     "label": "Apply changes"
   },
   "tool_call": {
-    "name": "list" | "search" | "read" | "repo_map",
+    "name": "list" | "search" | "read" | "repo_map" | "knowledge_lookup",
     "args": {}
   }
 }

@@ -96,6 +96,101 @@ policies:
   approval_policy: on-write
 """
 
+DEFAULT_SKILLS: dict[str, str] = {
+    "discover": """---
+name: discover
+description: Study the codebase and documentation before proposing changes.
+version: "1"
+summary: Read-first AIDD discovery role.
+tags: [analysis, aidd, discovery]
+triggers: [discover, analyze, study, inspect, understand]
+constraints:
+  - Do not modify files.
+  - Do not suggest improvements unless explicitly requested.
+  - Focus on describing the current system and how parts connect.
+stop_conditions:
+  - The relevant modules and docs have been inspected.
+  - The current architecture is explained clearly.
+---
+## Role
+Analyst studying the project.
+
+## Goal
+Understand what the system does, which components exist, and how they interact.
+
+## Constraints
+- No file mutations.
+- No speculative redesigns.
+- Prefer evidence from docs and source files.
+""",
+    "implement": """---
+name: implement
+description: Implement a feature strictly against the current specification.
+version: "1"
+summary: Spec-driven implementation role.
+tags: [implementation, aidd, spec]
+triggers: [implement, build, feature, spec]
+constraints:
+  - Follow the specification and existing project patterns.
+  - Do not change working code unless the task requires it.
+  - Keep changes minimal and scoped.
+stop_conditions:
+  - The requested feature is implemented and verified.
+---
+## Role
+Developer implementing a feature from the specification.
+
+## Constraints
+- Prefer tests before implementation when practical.
+- Do not add functionality beyond the described scope.
+- Respect existing boundaries and patterns.
+""",
+    "fix": """---
+name: fix
+description: Fix a concrete bug with minimal change scope.
+version: "1"
+summary: Bug-fix role with antipattern discipline.
+tags: [fix, bug, debug, aidd]
+triggers: [fix, bug, error, traceback, failing]
+constraints:
+  - Make the smallest safe change.
+  - Do not refactor unrelated code.
+  - Capture the cause and resolution in issues or antipatterns when relevant.
+stop_conditions:
+  - The failure is reproduced, fixed, and verified.
+---
+## Role
+Developer fixing a concrete failure.
+
+## Constraints
+- Prefer minimal edits.
+- Preserve working behavior around the bug.
+- Explain the cause, not only the patch.
+""",
+    "integrate": """---
+name: integrate
+description: Connect a new component into an existing system safely.
+version: "1"
+summary: Integration role for connecting existing parts.
+tags: [integrate, integration, wiring, aidd]
+triggers: [integrate, connect, wire, hook]
+constraints:
+  - Keep existing components stable.
+  - Change only integration points unless explicitly instructed otherwise.
+  - Follow established project conventions.
+stop_conditions:
+  - The new component is wired in and verified.
+---
+## Role
+Developer integrating a new component into the system.
+
+## Constraints
+- Avoid refactoring existing modules unless necessary for the connection point.
+- Prefer the project's established extension seams.
+- Verify the integration path after changes.
+""",
+}
+
 _IDENT_RE = re.compile(r"[^a-z0-9-]+")
 
 
@@ -135,6 +230,7 @@ def ensure_project_scaffold(project_root: Path) -> ScaffoldPaths:
         _seed_file(provider_registry_path, legacy_provider_path, DEFAULT_PROVIDER_REGISTRY)
     if not mcp_registry_path.exists():
         _seed_file(mcp_registry_path, legacy_mcp_path, DEFAULT_MCP_REGISTRY)
+    _seed_default_skills(skills_dir)
 
     return ScaffoldPaths(
         config_dir=config_dir,
@@ -151,6 +247,15 @@ def _seed_file(target: Path, legacy: Path, default_text: str) -> None:
         target.write_text(legacy.read_text(encoding="utf-8"), encoding="utf-8")
         return
     target.write_text(default_text, encoding="utf-8")
+
+
+def _seed_default_skills(skills_dir: Path) -> None:
+    for skill_id, content in DEFAULT_SKILLS.items():
+        target = skills_dir / skill_id / "SKILL.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            continue
+        target.write_text(content, encoding="utf-8")
 
 
 def _project_id_for_root(project_root: Path) -> str:

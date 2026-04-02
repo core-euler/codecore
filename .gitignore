@@ -26,6 +26,9 @@ dist/
 
 # CodeCore local runtime data
 .codecore-home/
+.codecore/session.json
+.codecore/context.md
+.codecore/snapshots/
 
 # Editor files
 .vscode/

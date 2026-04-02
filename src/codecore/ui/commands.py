@@ -40,7 +40,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec("diff", "/diff [paths]", "Show git status and diff for the workspace or active files"),
     CommandSpec("undo", "/undo [paths]", "Restore tracked files from HEAD when available"),
     CommandSpec("model", "/model <alias>", "Pin a model alias for the session"),
-    CommandSpec("skill", "/skill [name]", "Show, pin, or unpin skills"),
+    CommandSpec("skill", "/skill <list|load|edit|new|clear|name>", "List, pin, edit, or create skills"),
     CommandSpec("tag", "/tag [type]", "Show or change the task tag"),
     CommandSpec("rate", "/rate <1-5>", "Rate the last response"),
     CommandSpec("ping", "/ping", "Refresh provider health snapshot"),
@@ -48,6 +48,17 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec("drop", "/drop <file...>", "Remove files from active context"),
     CommandSpec("pin", "/pin <file...>", "Alias for /add"),
     CommandSpec("unpin", "/unpin <file...>", "Alias for /drop"),
+    CommandSpec("ctx", "/ctx <show|edit|trim|clear|save|load>", "Inspect, edit, trim, and snapshot transcript context"),
+    CommandSpec("issue", '/issue "description" | /issue list | /issue close <id> [resolution]', "Track logical and architectural issues"),
+    CommandSpec("ap", '/ap "traceback/details" | /ap list | /ap search <query>', "Track repeated execution antipatterns"),
+    CommandSpec("kb", "/kb <init|add|index|show|edit|lookup>", "Manage and query the markdown knowledge base under docs/"),
+    CommandSpec("complete", "/complete <phase-name>", "Create a result marker for a completed phase and reindex knowledge"),
+    CommandSpec("search", "/search <query>", "Run a lightweight web search"),
+    CommandSpec("verify", "/verify [claim|test command]", "Verify a claim on the web or run explicit test verification"),
+    CommandSpec("docs", "/docs <package>", "Resolve the latest package version and documentation URL"),
+    CommandSpec("deps", "/deps", "Compare project dependencies against latest PyPI versions"),
+    CommandSpec("proofs", "/proofs", "Show proof records gathered in this session"),
+    CommandSpec("mcp", "/mcp <list|status|add|disable|enable>", "Inspect and manage configured MCP servers"),
     CommandSpec("clear", "/clear", "Clear active files and model pin"),
     CommandSpec("exit", "/exit", "End the session"),
 )
@@ -60,5 +71,6 @@ HELP_TEXT = "Available commands:\n" + "\n".join(
     "  Enter submits the prompt\n"
     "  Ctrl+J inserts a newline\n"
     "  Type `/` to open command completion and move with arrow keys\n"
+    "  Use `/ctx edit` to rewrite transcript context in $EDITOR\n"
     "  If CodeCore offers to start implementation, press `1` or use `/apply`\n"
 )

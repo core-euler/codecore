@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 from ..domain.contracts import ContextComposer
 from ..domain.models import ChatRequest
@@ -56,14 +57,21 @@ class DefaultContextComposer(ContextComposer):
         )
 
     async def compose(self, request: ChatRequest) -> ChatRequest:
-        user_prompt = "\n".join(message.content for message in request.messages if message.role == "user")
+        user_messages = [message.content for message in request.messages if message.role == "user"]
+        full_user_prompt = "\n".join(user_messages)
+        user_prompt = str(request.metadata.get("latest_prompt") or (user_messages[-1] if user_messages else ""))
+        history_messages = request.messages[:-1] if len(request.messages) > 1 else ()
+        transcript_block = self._render_transcript_block(history_messages)
         reserved_output_tokens = request.max_output_tokens or None
         base_budget = self._budget_planner.plan(
             BASE_SYSTEM_PROMPT,
             request.system_prompt,
+            transcript_block,
             user_prompt,
             reserved_output_tokens=reserved_output_tokens,
         )
+        project_docs_block = self._render_project_docs_context(max(0, min(2048, base_budget.available_context_tokens // 4)))
+        project_docs_tokens = estimate_text_tokens(project_docs_block) if project_docs_block else 0
 
         selected_skills = ()
         skill_block = ""
@@ -94,6 +102,8 @@ class DefaultContextComposer(ContextComposer):
         memory_budget_plan = self._budget_planner.plan(
             BASE_SYSTEM_PROMPT,
             request.system_prompt,
+            project_docs_block,
+            transcript_block,
             skill_block,
             tool_block,
             user_prompt,
@@ -128,6 +138,8 @@ class DefaultContextComposer(ContextComposer):
         context_budget = self._budget_planner.plan(
             BASE_SYSTEM_PROMPT,
             request.system_prompt,
+            project_docs_block,
+            transcript_block,
             skill_block,
             tool_block,
             memory_block,
@@ -157,11 +169,14 @@ class DefaultContextComposer(ContextComposer):
             + memory_block_tokens
             + repo_map_tokens
             + skill_block_tokens
+            + project_docs_tokens
         )
 
         parts = [BASE_SYSTEM_PROMPT]
         if request.system_prompt:
             parts.append(request.system_prompt)
+        if project_docs_block:
+            parts.append(project_docs_block)
         if skill_block:
             parts.append(skill_block)
         if tool_block:
@@ -204,6 +219,7 @@ class DefaultContextComposer(ContextComposer):
                 "memory_block_tokens": memory_block_tokens,
                 "repo_map_tokens": repo_map_tokens,
                 "skill_block_tokens": skill_block_tokens,
+                "project_docs_tokens": project_docs_tokens,
                 "context_display_file_count": display_file_count,
                 "context_total_tokens": context_total_tokens,
                 "recalled_memories": [
@@ -221,6 +237,9 @@ class DefaultContextComposer(ContextComposer):
                 "tool_context_included": bool(tool_block),
                 "memory_block_included": bool(memory_block),
                 "repo_map_included": bool(repo_map_text),
+                "project_docs_included": bool(project_docs_block),
+                "transcript_message_count": len(history_messages),
+                "full_user_prompt_tokens": estimate_text_tokens(full_user_prompt) if full_user_prompt else 0,
                 "prompt_budget": {
                     "max_prompt_tokens": context_budget.max_prompt_tokens,
                     "soft_limit_tokens": context_budget.soft_limit_tokens,
@@ -232,6 +251,69 @@ class DefaultContextComposer(ContextComposer):
             }
         )
         return replace(request, system_prompt="\n\n".join(parts), metadata=metadata)
+
+    @staticmethod
+    def _render_transcript_block(messages) -> str:
+        if not messages:
+            return ""
+        parts = ["Session transcript:"]
+        for item in messages:
+            role = item.role.upper()
+            parts.append(f"[{role}]\n{item.content}")
+        return "\n\n".join(parts)
+
+    def _render_project_docs_context(self, budget_tokens: int) -> str:
+        if budget_tokens <= 0:
+            return ""
+        docs_root = self._context_manager.project_root / "docs"
+        blocks: list[str] = []
+        spent = 0
+        for label, content in (
+            ("Project spec", self._load_doc_excerpt(docs_root / "spec.md", max_tokens=min(1024, budget_tokens))),
+            ("Known antipatterns", self._load_doc_excerpt(docs_root / "antipatterns.md", max_tokens=min(512, budget_tokens))),
+            ("Open issues", self._render_open_issues(docs_root / "issues.md", max_tokens=min(512, budget_tokens))),
+        ):
+            if not content:
+                continue
+            tokens = estimate_text_tokens(content)
+            if spent and spent + tokens > budget_tokens:
+                continue
+            blocks.append(f"{label}:\n{content}")
+            spent += tokens
+        return "\n\n".join(blocks)
+
+    @staticmethod
+    def _load_doc_excerpt(path: Path, *, max_tokens: int) -> str:
+        if max_tokens <= 0 or not path.exists() or not path.is_file():
+            return ""
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+        if not text:
+            return ""
+        if estimate_text_tokens(text) <= max_tokens:
+            return text
+        return text[: max_tokens * 4].rstrip() + "\n...<truncated>"
+
+    @staticmethod
+    def _render_open_issues(path: Path, *, max_tokens: int) -> str:
+        if max_tokens <= 0 or not path.exists() or not path.is_file():
+            return ""
+        text = path.read_text(encoding="utf-8", errors="replace")
+        sections = text.split("\n## [")
+        open_items: list[str] = []
+        for raw in sections[1:]:
+            block = "## [" + raw.strip()
+            lowered = block.lower()
+            if "**status:**" not in lowered:
+                continue
+            if "\nresolved" in lowered or "\nclosed" in lowered:
+                continue
+            open_items.append(block)
+        if not open_items:
+            return ""
+        joined = "\n\n".join(open_items)
+        if estimate_text_tokens(joined) <= max_tokens:
+            return joined
+        return joined[: max_tokens * 4].rstrip() + "\n...<truncated>"
 
     def _render_tool_context(self, budget_tokens: int) -> str:
         if budget_tokens <= 0:

@@ -135,6 +135,37 @@ class ContextRuntimeTest(unittest.TestCase):
             self.assertIn("src/", composed.system_prompt)
             self.assertTrue(composed.metadata["repo_map_included"])
 
+    def test_composer_injects_project_docs_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            docs_dir = temp_path / "docs"
+            docs_dir.mkdir()
+            (docs_dir / "spec.md").write_text("# Spec\n\nJWT auth is required.\n", encoding="utf-8")
+            (docs_dir / "antipatterns.md").write_text("# Antipatterns\n\n## [AP-001] Missing dependency\n", encoding="utf-8")
+            (docs_dir / "issues.md").write_text(
+                "# Issues\n\n## [ISSUE-001] Expired token handling\n\n**Status:**\nOpen\n\n**Description:**\nReturn 401.\n",
+                encoding="utf-8",
+            )
+            manager = ContextManager(temp_path, max_file_bytes=100000)
+            session = new_session_runtime()
+            runtime_state = RuntimeState.default()
+            manifest = ProjectManifest(
+                project_id="project-docs-test",
+                default_task_tag="general",
+                context=ProjectContextConfig(max_prompt_tokens=4096, auto_compact_threshold_pct=80),
+                skills=ProjectSkillsConfig(auto_activate=False, defaults=[]),
+            )
+            composer = DefaultContextComposer(manager, session, runtime_state, manifest)
+
+            request = ChatRequest(messages=(ChatMessage(role="user", content="implement auth"),))
+            composed = asyncio.run(composer.compose(request))
+
+            self.assertIn("Project spec:", composed.system_prompt)
+            self.assertIn("JWT auth is required.", composed.system_prompt)
+            self.assertIn("Known antipatterns:", composed.system_prompt)
+            self.assertIn("Open issues:", composed.system_prompt)
+            self.assertTrue(composed.metadata["project_docs_included"])
+
 
 if __name__ == "__main__":
     unittest.main()

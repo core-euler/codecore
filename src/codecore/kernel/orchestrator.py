@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import re
+import shlex
+import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from ..agents import MultiAgentRunner
 from ..context.manager import ContextManager
@@ -32,6 +36,11 @@ from ..providers.health import ProviderHealthService
 from ..providers.registry import ProviderRegistry
 from ..telemetry.analytics import TelemetryAnalytics
 from ..ui.commands import HELP_TEXT
+from ..infra.aidd_docs import AIDDDocsStore
+from ..infra.knowledge_base import KnowledgeBaseStore
+from ..infra.session_state import SessionStateStore
+from ..infra.web_research import WebResearchService
+from ..mcp.control_plane import MCPControlPlane
 
 AUTOEDIT_SYSTEM_PROMPT = AUTOEDIT_RESPONSE_SCHEMA
 _FOLLOW_UP_CONFIRM_RE = re.compile(
@@ -62,6 +71,11 @@ class Orchestrator:
     file_change_audit: FileChangeAudit | None = None
     approval_manager: ApprovalManager | None = None
     verification_engine: VerificationEngine | None = None
+    session_store: SessionStateStore | None = None
+    aidd_docs_store: AIDDDocsStore | None = None
+    knowledge_base_store: KnowledgeBaseStore | None = None
+    web_research_service: WebResearchService | None = None
+    mcp_control_plane: MCPControlPlane | None = None
     edit_parser: StructuredEditParser = field(default_factory=StructuredEditParser)
     response_parser: ModelResponseParser = field(default_factory=ModelResponseParser)
     command_router: CommandRouter = field(init=False)
@@ -95,6 +109,16 @@ class Orchestrator:
         self.command_router.register("drop", self._cmd_drop)
         self.command_router.register("pin", self._cmd_add)
         self.command_router.register("unpin", self._cmd_drop)
+        self.command_router.register("ctx", self._cmd_ctx)
+        self.command_router.register("issue", self._cmd_issue)
+        self.command_router.register("ap", self._cmd_antipattern)
+        self.command_router.register("kb", self._cmd_kb)
+        self.command_router.register("complete", self._cmd_complete)
+        self.command_router.register("search", self._cmd_search)
+        self.command_router.register("docs", self._cmd_docs)
+        self.command_router.register("deps", self._cmd_deps)
+        self.command_router.register("proofs", self._cmd_proofs)
+        self.command_router.register("mcp", self._cmd_mcp)
         self.command_router.register("clear", self._cmd_clear)
         self.command_router.register("exit", self._cmd_exit)
 
@@ -107,6 +131,7 @@ class Orchestrator:
                 task_tag=self.session.task_tag,
             )
         )
+        self._persist_session_state()
 
     async def stop(self) -> None:
         await self.event_bus.publish(
@@ -119,6 +144,7 @@ class Orchestrator:
                 skill_ids=tuple(self.session.active_skills),
             )
         )
+        self._persist_session_state()
 
     async def handle_line(self, line: str) -> CommandResult:
         stripped = line.strip()
@@ -134,7 +160,12 @@ class Orchestrator:
         turn = new_turn_context(prompt)
         self.session.last_user_prompt = prompt
         self.session.pending_follow_up_action = None
-        return await self._run_response_loop(prompt, turn_id=turn.turn_id)
+        result = await self._run_response_loop(prompt, turn_id=turn.turn_id)
+        if result.output and not result.is_error:
+            self.session.transcript.append(ChatMessage(role="user", content=prompt))
+            self.session.transcript.append(ChatMessage(role="assistant", content=result.output))
+        self._persist_session_state()
+        return result
 
     async def _invoke_request(
         self,
@@ -242,19 +273,18 @@ class Orchestrator:
         observations: list[str] = []
         max_steps = 4
         for step in range(max_steps):
+            loop_prompt = self._build_response_loop_user_prompt(prompt, observations, step=step + 1, max_steps=max_steps)
             request = ChatRequest(
                 messages=(
-                    ChatMessage(
-                        role="user",
-                        content=self._build_response_loop_user_prompt(prompt, observations, step=step + 1, max_steps=max_steps),
-                    ),
+                    *tuple(self.session.transcript),
+                    ChatMessage(role="user", content=loop_prompt),
                 ),
                 system_prompt=GENERAL_RESPONSE_SCHEMA,
                 task_tag=self.session.task_tag,
                 model_hint=self.runtime_state.manual_model_alias,
                 max_output_tokens=900,
                 json_mode=True,
-                metadata={"mode": "response-loop", "step": step + 1},
+                metadata={"mode": "response-loop", "step": step + 1, "latest_prompt": prompt},
             )
             request = await self.context_composer.compose(request)
             self._update_context_metrics(request)
@@ -338,7 +368,8 @@ class Orchestrator:
                 '- list {"path": ".", "max_entries": 80}\n'
                 '- search {"query": "...", "path": ".", "max_matches": 20}\n'
                 '- read {"path": "relative/file.py", "start_line": 1, "end_line": 200}\n'
-                '- repo_map {"max_depth": 4}'
+                '- repo_map {"max_depth": 4}\n'
+                '- knowledge_lookup {"query": "...", "max_results": 3}'
             )
         if observations:
             lines.append("Tool observations gathered so far:\n" + "\n\n".join(observations[-3:]))
@@ -829,9 +860,11 @@ class Orchestrator:
         return CommandResult(output=f"Dismissed approval: {dismissed.approval_id} ({dismissed.action})")
 
     async def _cmd_verify(self, args: list[str]) -> CommandResult:
+        command = " ".join(args) if args else None
+        if command and not self._looks_like_test_command(command):
+            return await self._cmd_verify_claim(args)
         if self.verification_engine is None:
             return CommandResult(output="Verification engine is not configured.", is_error=True)
-        command = " ".join(args) if args else None
         if command and self.policy_engine is not None:
             decision = await self.policy_engine.evaluate_tool_call(command)
             if decision.action.value != "allow":
@@ -882,6 +915,7 @@ class Orchestrator:
     async def _cmd_model(self, args: list[str]) -> CommandResult:
         if not args:
             self.runtime_state.manual_model_alias = None
+            self._persist_session_state()
             return CommandResult(output="Model pin cleared; broker will auto-select.")
         alias = args[0]
         route = self.provider_registry.by_alias(alias) or self.provider_registry.by_model_id(alias)
@@ -889,29 +923,92 @@ class Orchestrator:
             return CommandResult(output=f"Unknown model alias: {alias}", is_error=True)
         self.runtime_state.manual_model_alias = alias
         self.runtime_state.active_model_context_tokens = route.max_context_tokens
+        self._persist_session_state()
         return CommandResult(output=f"Pinned model alias: {alias}")
 
     async def _cmd_skill(self, args: list[str]) -> CommandResult:
         if self.skill_registry is None:
             return CommandResult(output="Skill registry is not configured.", is_error=True)
         if not args:
+            args = ["list"]
+        action = args[0]
+        if action == "list":
             available = ", ".join(skill.skill_id for skill in await self.skill_registry.list_skills()) or "<none>"
             pinned = ", ".join(self.runtime_state.active_skills) if self.runtime_state.active_skills else "<none>"
             active = ", ".join(self.session.active_skills) if self.session.active_skills else "<none>"
             return CommandResult(output=f"available={available}\npinned={pinned}\nactive={active}")
-        if args[0] == "clear":
+        if action == "clear":
             self.runtime_state.active_skills.clear()
+            self._persist_session_state()
             return CommandResult(output="Cleared pinned skills.")
-        skill_id = args[0]
+        if action == "load":
+            if len(args) < 2:
+                return CommandResult(output="Usage: /skill load <name>", is_error=True)
+            return await self._pin_skill(args[1])
+        if action == "edit":
+            if len(args) < 2:
+                return CommandResult(output="Usage: /skill edit <name>", is_error=True)
+            return await self._edit_skill(args[1])
+        if action == "new":
+            if len(args) < 2:
+                return CommandResult(output="Usage: /skill new <name>", is_error=True)
+            return await self._create_skill(args[1])
+        skill_id = action
         try:
             await self.skill_registry.resolve(skill_id)
         except KeyError:
             return CommandResult(output=f"Unknown skill: {skill_id}", is_error=True)
         if skill_id in self.runtime_state.active_skills:
             self.runtime_state.active_skills.remove(skill_id)
+            self._persist_session_state()
             return CommandResult(output=f"Unpinned skill: {skill_id}")
         self.runtime_state.active_skills.append(skill_id)
+        self._persist_session_state()
         return CommandResult(output=f"Pinned skill: {skill_id}")
+
+    async def _pin_skill(self, skill_id: str) -> CommandResult:
+        try:
+            await self.skill_registry.resolve(skill_id)
+        except KeyError:
+            return CommandResult(output=f"Unknown skill: {skill_id}", is_error=True)
+        if skill_id in self.runtime_state.active_skills:
+            return CommandResult(output=f"Skill already pinned: {skill_id}")
+        self.runtime_state.active_skills.append(skill_id)
+        self._persist_session_state()
+        return CommandResult(output=f"Pinned skill: {skill_id}")
+
+    async def _edit_skill(self, skill_id: str) -> CommandResult:
+        source_path = getattr(self.skill_registry, "source_path", lambda _: None)(skill_id)
+        if source_path is None:
+            return CommandResult(output=f"Unknown skill: {skill_id}", is_error=True)
+        editor = os.environ.get("EDITOR")
+        command = shlex.split(editor) if editor else ["vi"]
+        try:
+            subprocess.run([*command, source_path], check=True)
+        except subprocess.CalledProcessError as exc:
+            return CommandResult(output=f"Editor exited with status {exc.returncode}", is_error=True)
+        reload_skills = getattr(self.skill_registry, "reload", None)
+        if callable(reload_skills):
+            reload_skills()
+        return CommandResult(output=f"Edited skill: {skill_id}")
+
+    async def _create_skill(self, skill_id: str) -> CommandResult:
+        if not re.fullmatch(r"[a-z0-9-]+", skill_id):
+            return CommandResult(output="Skill name must match [a-z0-9-]+.", is_error=True)
+        roots = getattr(self.skill_registry, "roots", lambda: ())()
+        if not roots:
+            return CommandResult(output="Skill registry roots are not available.", is_error=True)
+        target_root = next((Path(root) for root in roots if Path(root).name == "skills"), Path(roots[0]))
+        target = target_root / skill_id / "SKILL.md"
+        if target.exists():
+            return CommandResult(output=f"Skill already exists: {skill_id}", is_error=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(self._render_skill_template(skill_id), encoding="utf-8")
+        reload_skills = getattr(self.skill_registry, "reload", None)
+        if callable(reload_skills):
+            reload_skills()
+        relative = target.resolve().relative_to(self.context_manager.project_root.resolve())
+        return CommandResult(output=f"Created skill skeleton: {relative}")
 
     async def _cmd_tag(self, args: list[str]) -> CommandResult:
         if not args:
@@ -923,6 +1020,7 @@ class Orchestrator:
             available = ", ".join(tag.value for tag in TaskTag)
             return CommandResult(output=f"Unknown task tag: {raw}. Available: {available}", is_error=True)
         self.session.task_tag = tag
+        self._persist_session_state()
         return CommandResult(output=f"Task tag set to: {tag.value}")
 
     async def _cmd_rate(self, args: list[str]) -> CommandResult:
@@ -949,12 +1047,331 @@ class Orchestrator:
                 payload={"rating": rating},
             )
         )
+        self._persist_session_state()
         return CommandResult(output=f"Recorded rating: {rating}")
 
     async def _cmd_ping(self, _: list[str]) -> CommandResult:
         snapshot = await self.health_service.refresh(force=True)
         text = "\n".join(f"{name}: {status.state.value} ({status.detail})" for name, status in sorted(snapshot.items()))
         return CommandResult(output=text or "No providers configured.")
+
+    async def _cmd_ctx(self, args: list[str]) -> CommandResult:
+        if self.session_store is None:
+            return CommandResult(output="Context state store is not configured.", is_error=True)
+        if not args:
+            return CommandResult(
+                output="Usage: /ctx <show|edit|trim|clear|save|load> [args]",
+                is_error=True,
+            )
+        action = args[0].lower()
+        if action == "show":
+            return CommandResult(output=self.session_store.render_markdown(self.session), render_mode="markdown")
+        if action == "edit":
+            try:
+                self.session.transcript = self.session_store.edit_context(self.session, editor=os.environ.get("EDITOR"))
+            except subprocess.CalledProcessError as exc:
+                return CommandResult(output=f"Editor exited with code {exc.returncode}.", is_error=True)
+            self._persist_session_state()
+            return CommandResult(output="Context updated from editor.")
+        if action == "trim":
+            if len(args) < 2:
+                return CommandResult(output="Usage: /ctx trim <n|user|last>", is_error=True)
+            outcome = self._trim_context(args[1])
+            if outcome is None:
+                return CommandResult(output=f"Unsupported trim target: {args[1]}", is_error=True)
+            self._persist_session_state()
+            return CommandResult(output=outcome)
+        if action == "clear":
+            self.session.transcript.clear()
+            self._persist_session_state()
+            return CommandResult(output="Cleared transcript context.")
+        if action == "save":
+            if len(args) < 2:
+                return CommandResult(output="Usage: /ctx save <name>", is_error=True)
+            snapshot = self.session_store.save_snapshot(args[1], self.session)
+            self._persist_session_state()
+            return CommandResult(output=f"Saved context snapshot: {snapshot.stem}")
+        if action == "load":
+            if len(args) < 2:
+                return CommandResult(output="Usage: /ctx load <name>", is_error=True)
+            try:
+                self.session.transcript = self.session_store.load_snapshot(args[1])
+            except FileNotFoundError:
+                known = ", ".join(self.session_store.list_snapshots()) or "<none>"
+                return CommandResult(output=f"Unknown context snapshot: {args[1]}. Known: {known}", is_error=True)
+            self._persist_session_state()
+            return CommandResult(output=f"Loaded context snapshot: {args[1]}")
+        return CommandResult(output=f"Unknown /ctx action: {action}", is_error=True)
+
+    async def _cmd_issue(self, args: list[str]) -> CommandResult:
+        if self.aidd_docs_store is None:
+            return CommandResult(output="AIDD docs store is not configured.", is_error=True)
+        if not args:
+            return CommandResult(output='Usage: /issue "description" | /issue list | /issue close <id> [resolution]', is_error=True)
+        action = args[0].lower()
+        if action == "list":
+            issues = self.aidd_docs_store.list_issues()
+            if not issues:
+                return CommandResult(output="No open issues.")
+            lines = [f"{item.entry_id} | {item.status} | {item.title}" for item in issues]
+            return CommandResult(output="\n".join(lines))
+        if action == "close":
+            if len(args) < 2:
+                return CommandResult(output="Usage: /issue close <id> [resolution]", is_error=True)
+            resolution = " ".join(args[2:]).strip() or None
+            item = self.aidd_docs_store.close_issue(args[1].upper(), resolution)
+            if item is None:
+                return CommandResult(output=f"Unknown issue id: {args[1]}", is_error=True)
+            return CommandResult(output=f"Closed {item.entry_id}: {item.title}")
+        description = " ".join(args).strip()
+        entry = self.aidd_docs_store.add_issue(description)
+        return CommandResult(output=f"Created {entry.entry_id}: {entry.title}")
+
+    async def _cmd_antipattern(self, args: list[str]) -> CommandResult:
+        if self.aidd_docs_store is None:
+            return CommandResult(output="AIDD docs store is not configured.", is_error=True)
+        if not args:
+            return CommandResult(output='Usage: /ap "traceback/details" | /ap list | /ap search <query>', is_error=True)
+        action = args[0].lower()
+        if action == "list":
+            entries = self.aidd_docs_store.list_antipatterns()
+            if not entries:
+                return CommandResult(output="No antipatterns recorded.")
+            lines = [f"{item.entry_id} | {item.title}" for item in entries]
+            return CommandResult(output="\n".join(lines))
+        if action == "search":
+            if len(args) < 2:
+                return CommandResult(output="Usage: /ap search <query>", is_error=True)
+            entries = self.aidd_docs_store.search_antipatterns(" ".join(args[1:]))
+            if not entries:
+                return CommandResult(output="No antipatterns matched the query.")
+            lines = [f"{item.entry_id} | {item.title}" for item in entries]
+            return CommandResult(output="\n".join(lines))
+        details = " ".join(args).strip()
+        entry = self.aidd_docs_store.add_antipattern(details)
+        return CommandResult(output=f"Recorded {entry.entry_id}: {entry.title}")
+
+    async def _cmd_kb(self, args: list[str]) -> CommandResult:
+        if self.knowledge_base_store is None:
+            return CommandResult(output="Knowledge base store is not configured.", is_error=True)
+        if not args:
+            return CommandResult(output="Usage: /kb <init|add|index|show|edit|lookup> [args]", is_error=True)
+        action = args[0].lower()
+        if action == "init":
+            created = self.knowledge_base_store.init_structure()
+            if not created:
+                return CommandResult(output="Knowledge base structure already exists.")
+            lines = ["Initialized knowledge base:"]
+            lines.extend(f"- {path.relative_to(self.context_manager.project_root)}" for path in created)
+            return CommandResult(output="\n".join(lines))
+        if action == "add":
+            if len(args) < 2:
+                return CommandResult(output="Usage: /kb add <file.md>", is_error=True)
+            try:
+                entry = self.knowledge_base_store.add_document(args[1])
+            except (FileNotFoundError, ValueError, RuntimeError) as exc:
+                return CommandResult(output=str(exc), is_error=True)
+            return CommandResult(output=f"Indexed {entry.doc_id}: {entry.path}")
+        if action == "index":
+            documents = self.knowledge_base_store.index_docs()
+            return CommandResult(output=f"Indexed {len(documents)} knowledge document(s).")
+        if action == "show":
+            documents = self.knowledge_base_store.load_documents()
+            if not documents:
+                return CommandResult(output="Knowledge base index is empty.")
+            lines = [
+                f"{item.doc_id} | {item.path} | {item.tokens} tok | {item.updated_at}"
+                for item in documents
+            ]
+            return CommandResult(output="\n".join(lines))
+        if action == "lookup":
+            if len(args) < 2:
+                return CommandResult(output="Usage: /kb lookup <query>", is_error=True)
+            matches = self.knowledge_base_store.lookup(" ".join(args[1:]))
+            if not matches:
+                return CommandResult(output="No knowledge documents matched the query.")
+            lines = ["Knowledge matches:"]
+            for item in matches:
+                lines.append(f"- {item.doc_id} | {item.path} | score={item.score}")
+            return CommandResult(output="\n".join(lines))
+        if action == "edit":
+            if len(args) < 2:
+                return CommandResult(output="Usage: /kb edit <doc-id|path>", is_error=True)
+            try:
+                path = self.knowledge_base_store.edit_document(args[1], editor=os.environ.get("EDITOR"))
+            except subprocess.CalledProcessError as exc:
+                return CommandResult(output=f"Editor exited with code {exc.returncode}.", is_error=True)
+            except FileNotFoundError:
+                return CommandResult(output=f"Unknown knowledge document: {args[1]}", is_error=True)
+            return CommandResult(output=f"Edited knowledge document: {path.relative_to(self.context_manager.project_root)}")
+        return CommandResult(output=f"Unknown /kb action: {action}", is_error=True)
+
+    async def _cmd_complete(self, args: list[str]) -> CommandResult:
+        if self.knowledge_base_store is None:
+            return CommandResult(output="Knowledge base store is not configured.", is_error=True)
+        if not args:
+            return CommandResult(output="Usage: /complete <phase-name>", is_error=True)
+        try:
+            result_path = self.knowledge_base_store.complete_phase(args[0])
+        except ValueError as exc:
+            return CommandResult(output=str(exc), is_error=True)
+        return CommandResult(output=f"Completed phase marker: {result_path.relative_to(self.context_manager.project_root)}")
+
+    async def _cmd_search(self, args: list[str]) -> CommandResult:
+        if self.web_research_service is None:
+            return CommandResult(output="Web research service is not configured.", is_error=True)
+        if not args:
+            return CommandResult(output="Usage: /search <query>", is_error=True)
+        query = " ".join(args).strip()
+        try:
+            results = self.web_research_service.search(query)
+        except Exception as exc:
+            return CommandResult(output=f"Search failed: {exc}", is_error=True)
+        if not results:
+            return CommandResult(output=f"No search results for '{query}'.")
+        lines = [f"[web] Search: {query}"]
+        for item in results:
+            lines.append(f"- {item.title}\n  {item.url}\n  {item.snippet}")
+        return CommandResult(output="\n".join(lines))
+
+    async def _cmd_verify_claim(self, args: list[str]) -> CommandResult:
+        if self.web_research_service is None:
+            return CommandResult(output="Web research service is not configured.", is_error=True)
+        if not args:
+            return CommandResult(output="Usage: /verify <claim>", is_error=True)
+        claim = " ".join(args).strip()
+        try:
+            proofs = self.web_research_service.verify(claim)
+        except Exception as exc:
+            return CommandResult(output=f"Verification failed: {exc}", is_error=True)
+        if not proofs:
+            return CommandResult(output=f"No proofs found for '{claim}'.")
+        self._remember_proofs(
+            {
+                "claim": item.claim,
+                "title": item.title,
+                "url": item.url,
+                "snippet": item.snippet,
+                "checked_at": item.checked_at,
+            }
+            for item in proofs
+        )
+        lines = [f"[proof] Claim: {claim}"]
+        for item in proofs:
+            lines.append(f"- {item.title}\n  {item.url}\n  {item.snippet}")
+        return CommandResult(output="\n".join(lines))
+
+    async def _cmd_docs(self, args: list[str]) -> CommandResult:
+        if self.web_research_service is None:
+            return CommandResult(output="Web research service is not configured.", is_error=True)
+        if not args:
+            return CommandResult(output="Usage: /docs <package>", is_error=True)
+        package = args[0].strip()
+        try:
+            docs = self.web_research_service.docs(package)
+        except Exception as exc:
+            return CommandResult(output=f"Docs lookup failed: {exc}", is_error=True)
+        proof = {
+            "claim": f"docs for {package}",
+            "title": docs.package,
+            "url": docs.docs_url or "",
+            "snippet": f"latest={docs.latest}",
+            "checked_at": "pypi",
+        }
+        self._remember_proofs((proof,))
+        lines = [f"package={docs.package}", f"latest={docs.latest}"]
+        if docs.docs_url:
+            lines.append(f"docs={docs.docs_url}")
+        return CommandResult(output="\n".join(lines))
+
+    async def _cmd_deps(self, _: list[str]) -> CommandResult:
+        if self.web_research_service is None:
+            return CommandResult(output="Web research service is not configured.", is_error=True)
+        try:
+            items = self.web_research_service.inspect_dependencies(self.context_manager.project_root)
+        except Exception as exc:
+            return CommandResult(output=f"Dependency inspection failed: {exc}", is_error=True)
+        if not items:
+            return CommandResult(output="No supported dependency manifest was found.")
+        lines = ["Package | Used | Latest | Status"]
+        for item in items:
+            lines.append(f"{item.package} | {item.used} | {item.latest} | {item.status}")
+        return CommandResult(output="\n".join(lines))
+
+    async def _cmd_proofs(self, _: list[str]) -> CommandResult:
+        if not self.session.recent_proofs:
+            return CommandResult(output="No proofs recorded in this session.")
+        lines = ["Session proofs:"]
+        for item in self.session.recent_proofs:
+            lines.append(
+                f"- {item.get('claim', '')}\n"
+                f"  {item.get('title', '')}\n"
+                f"  {item.get('url', '')}\n"
+                f"  {item.get('snippet', '')}"
+            )
+        return CommandResult(output="\n".join(lines))
+
+    async def _cmd_mcp(self, args: list[str]) -> CommandResult:
+        if self.mcp_control_plane is None:
+            return CommandResult(output="MCP control plane is not configured.", is_error=True)
+        if not args:
+            return CommandResult(output="Usage: /mcp <list|status|add|disable|enable>", is_error=True)
+        action = args[0].lower()
+        if action == "list":
+            servers = self.mcp_control_plane.list_servers()
+            if not servers:
+                return CommandResult(output="No MCP servers configured.")
+            lines = ["MCP servers:"]
+            for item in servers:
+                lines.append(
+                    f"- {item.server_id} | enabled={'yes' if item.enabled else 'no'} | transport={item.transport}"
+                    f" | trust={item.trust_level or '-'} | risk={item.risk_class or '-'}"
+                )
+            return CommandResult(output="\n".join(lines))
+        if action == "status":
+            statuses = self.mcp_control_plane.status()
+            if not statuses:
+                return CommandResult(output="No MCP servers configured.")
+            lines = ["MCP status:"]
+            for item in statuses:
+                target = item.command or item.url or "-"
+                lines.append(
+                    f"- {item.server_id} | enabled={'yes' if item.enabled else 'no'} | {item.state.value} | {target} | {item.detail}"
+                )
+            return CommandResult(output="\n".join(lines))
+        if action == "disable":
+            if len(args) < 2:
+                return CommandResult(output="Usage: /mcp disable <server-id>", is_error=True)
+            try:
+                item = self.mcp_control_plane.disable_server(args[1])
+            except KeyError:
+                return CommandResult(output=f"Unknown MCP server: {args[1]}", is_error=True)
+            return CommandResult(output=f"Disabled MCP server: {item.server_id}")
+        if action == "enable":
+            if len(args) < 2:
+                return CommandResult(output="Usage: /mcp enable <server-id>", is_error=True)
+            try:
+                item = self.mcp_control_plane.enable_server(args[1])
+            except KeyError:
+                return CommandResult(output=f"Unknown MCP server: {args[1]}", is_error=True)
+            return CommandResult(output=f"Enabled MCP server: {item.server_id}")
+        if action == "add":
+            if len(args) < 2:
+                return CommandResult(output="Usage: /mcp add <preset|server-id> [command...] [--url <url>]", is_error=True)
+            url = None
+            command_parts = tuple(args[2:])
+            if "--url" in command_parts:
+                index = command_parts.index("--url")
+                if index + 1 >= len(command_parts):
+                    return CommandResult(output="Usage: /mcp add <server-id> --url <url>", is_error=True)
+                url = command_parts[index + 1]
+                command_parts = command_parts[:index]
+            try:
+                item = self.mcp_control_plane.add_server(args[1], command_parts=command_parts, url=url)
+            except ValueError as exc:
+                return CommandResult(output=str(exc), is_error=True)
+            return CommandResult(output=f"Added MCP server: {item.server_id}")
+        return CommandResult(output=f"Unknown /mcp action: {action}", is_error=True)
 
     async def _cmd_add(self, args: list[str]) -> CommandResult:
         if not args:
@@ -963,6 +1380,7 @@ class Orchestrator:
         self.runtime_state.active_files = list(self.session.active_files)
         if not added:
             return CommandResult(output="No files were added.", is_error=True)
+        self._persist_session_state()
         return CommandResult(output="Added files: " + ", ".join(added))
 
     async def _cmd_drop(self, args: list[str]) -> CommandResult:
@@ -972,12 +1390,14 @@ class Orchestrator:
         self.runtime_state.active_files = list(self.session.active_files)
         if not removed:
             return CommandResult(output="No files were removed.", is_error=True)
+        self._persist_session_state()
         return CommandResult(output="Removed files: " + ", ".join(removed))
 
     async def _cmd_clear(self, _: list[str]) -> CommandResult:
         self.session.active_files.clear()
         self.runtime_state.active_files.clear()
         self.runtime_state.manual_model_alias = None
+        self._persist_session_state()
         return CommandResult(output="Cleared active files and model pin.")
 
     async def _cmd_exit(self, _: list[str]) -> CommandResult:
@@ -1390,6 +1810,7 @@ class Orchestrator:
         self.session.recent_tool_outputs.append(block)
         if len(self.session.recent_tool_outputs) > keep:
             self.session.recent_tool_outputs[:] = self.session.recent_tool_outputs[-keep:]
+        self._persist_session_state()
 
     def _update_context_metrics(self, request: ChatRequest) -> None:
         file_count = request.metadata.get("context_display_file_count")
@@ -1407,6 +1828,7 @@ class Orchestrator:
     def _allow_action_type(self, action: str) -> None:
         if action not in self.session.allowed_action_types:
             self.session.allowed_action_types.append(action)
+            self._persist_session_state()
 
     @staticmethod
     def _prepend_output(prefix: str, result: CommandResult) -> CommandResult:
@@ -1433,15 +1855,86 @@ class Orchestrator:
             return False
         return bool(_FOLLOW_UP_CONFIRM_RE.match(normalized))
 
+    @staticmethod
+    def _looks_like_test_command(command: str) -> bool:
+        first = command.strip().split(maxsplit=1)[0] if command.strip() else ""
+        return first in {"pytest", "py.test", "python", "python3", "uv", "tox", "nox", "npm", "pnpm", "yarn", "go", "cargo"}
+
+    @staticmethod
+    def _render_skill_template(skill_id: str) -> str:
+        return (
+            "---\n"
+            f"name: {skill_id}\n"
+            f"description: Describe what the {skill_id} skill does.\n"
+            'version: "1"\n'
+            f"summary: {skill_id.replace('-', ' ').title()} skill.\n"
+            "tags: []\n"
+            "triggers: []\n"
+            "constraints: []\n"
+            "stop_conditions: []\n"
+            "---\n"
+            "## Role\n"
+            "Specialized helper for this workflow.\n\n"
+            "## Goal\n"
+            "Describe the task this skill should help with.\n\n"
+            "## Constraints\n"
+            "- Add concrete operating rules here.\n"
+        )
+
     def _remember_failure(self, action: str, command: str, summary: str) -> None:
         self.session.last_failed_action = action
         self.session.last_failed_command = command
         self.session.last_failed_summary = summarize_output(summary, max_chars=800).rendered
+        self._persist_session_state()
+
+    def _remember_proofs(self, records) -> None:
+        for item in records:
+            self.session.recent_proofs.append({key: str(value) for key, value in item.items() if value})
+        self.session.recent_proofs = self.session.recent_proofs[-20:]
+        self._persist_session_state()
 
     def _clear_failure(self) -> None:
         self.session.last_failed_action = None
         self.session.last_failed_command = None
         self.session.last_failed_summary = None
+        self._persist_session_state()
+
+    def _trim_context(self, target: str) -> str | None:
+        normalized = target.lower()
+        if normalized == "user":
+            for index in range(len(self.session.transcript) - 1, -1, -1):
+                if self.session.transcript[index].role == "user":
+                    del self.session.transcript[index]
+                    return "Removed the last user message from transcript."
+            return "No user message is available to trim."
+        if normalized == "last":
+            removed = 0
+            while self.session.transcript and self.session.transcript[-1].role == "assistant":
+                self.session.transcript.pop()
+                removed += 1
+            while self.session.transcript and self.session.transcript[-1].role != "user":
+                self.session.transcript.pop()
+                removed += 1
+            if self.session.transcript and self.session.transcript[-1].role == "user":
+                self.session.transcript.pop()
+                removed += 1
+            return "Removed the last exchange from transcript." if removed else "Transcript is already empty."
+        try:
+            amount = int(normalized)
+        except ValueError:
+            return None
+        if amount <= 0:
+            return "Trim count must be positive."
+        if not self.session.transcript:
+            return "Transcript is already empty."
+        removed = min(amount, len(self.session.transcript))
+        del self.session.transcript[-removed:]
+        return f"Removed {removed} transcript message(s)."
+
+    def _persist_session_state(self) -> None:
+        if self.session_store is None:
+            return
+        self.session_store.save(self.session, self.runtime_state)
 
     def _find_patch_checkpoint(self, target: str) -> int | None:
         if target == "latest":

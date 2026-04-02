@@ -8,6 +8,7 @@ from .domain.enums import TaskTag
 from .infra.settings import Settings, load_settings
 from .infra.manifest_loader import load_mcp_registry, load_project_manifest, load_provider_registry
 from .infra.project_manifest import ProjectManifest
+from .infra.session_state import SessionStateStore
 from .kernel.runtime_state import RuntimeState
 from .kernel.session import SessionRuntime, new_session_runtime
 from .mcp.manifests import MCPRegistryManifest
@@ -45,6 +46,11 @@ def bootstrap_application() -> BootstrapContext:
         session.task_tag = TaskTag(project_manifest.default_task_tag)
     except ValueError:
         session.task_tag = TaskTag.GENERAL
+    SessionStateStore(
+        settings.session_state_path,
+        settings.context_edit_path,
+        settings.context_snapshot_dir,
+    ).load_into(session, runtime_state)
     return BootstrapContext(
         settings=settings,
         project_manifest=project_manifest,

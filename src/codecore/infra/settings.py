@@ -22,6 +22,11 @@ class Settings:
     repl_history_path: Path
     event_log_dir: Path
     artifact_dir: Path
+    session_state_path: Path
+    context_edit_path: Path
+    context_snapshot_dir: Path
+    knowledge_dir: Path
+    knowledge_index_path: Path
 
 
 def load_settings() -> Settings:
@@ -36,6 +41,13 @@ def load_settings() -> Settings:
     repl_history_path = codex_home / "history.txt"
     event_log_dir = codex_home / "events"
     artifact_dir = codex_home / "artifacts"
+    session_state_path = scaffold.config_dir / "session.json"
+    context_edit_path = scaffold.config_dir / "context.md"
+    context_snapshot_dir = scaffold.config_dir / "snapshots"
+    knowledge_dir = scaffold.config_dir / "knowledge"
+    knowledge_index_path = knowledge_dir / "index.json"
+    context_snapshot_dir.mkdir(parents=True, exist_ok=True)
+    knowledge_dir.mkdir(parents=True, exist_ok=True)
     return Settings(
         project_root=project_root,
         config_dir=scaffold.config_dir,
@@ -49,4 +61,9 @@ def load_settings() -> Settings:
         repl_history_path=repl_history_path,
         event_log_dir=event_log_dir,
         artifact_dir=artifact_dir,
+        session_state_path=session_state_path,
+        context_edit_path=context_edit_path,
+        context_snapshot_dir=context_snapshot_dir,
+        knowledge_dir=knowledge_dir,
+        knowledge_index_path=knowledge_index_path,
     )

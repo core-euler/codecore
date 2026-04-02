@@ -1,6 +1,6 @@
 # CodeCore Roadmap
 ## Живой roadmap проекта с текущим статусом, этапами и критериями готовности
-`updated: 2026-03-23 (phase 7 started: security hardening slice added)`
+`updated: 2026-04-02 (AIDD patch 1: context, knowledge, skills, web-research slices integrated)`
 
 ---
 
@@ -67,6 +67,8 @@
 - [x] Есть reviewer-isolated pipeline path и approval-backed apply-back через `change sets`
 - [x] Есть `coder -> test -> retry -> review` loop для isolated multi-agent pipelines
 - [x] Есть baseline benchmark mode: один task -> несколько model aliases
+- [x] Есть disk-backed transcript state: `.codecore/session.json`, `.codecore/context.md`, `.codecore/snapshots/`
+- [x] Есть `/ctx show|edit|trim|clear|save|load`
 
 ### Чего пока нет
 
@@ -76,6 +78,9 @@
 - [ ] CI pipeline
 - [ ] production-grade self-healing verification loop
 - [x] Есть базовый security hardening slice: threat model, redaction, untrusted-content guardrails
+- [x] AIDD docs loop: `/issue`, `/ap`, `/complete`
+- [x] Knowledge base loop: `/kb`, docs indexing, `knowledge_lookup`
+- [ ] Split Architect/Executor TUI mode
 
 ### Текущая фаза
 
@@ -100,6 +105,31 @@
 - [x] `Phase 5` — Execution + Automation (`v0.4`)
 - [ ] `Phase 6` — Multi-Agent + Worktrees (`v0.5`)
 - [ ] `Phase 7` — Benchmark, Hardening, Release (`v1.0`)
+
+## 3.1 AIDD Patch Track
+
+`patch_1.md` добавляет второй продуктовый контур: AIDD-операционную среду поверх уже существующего agent runtime.
+
+### Уже интегрировано
+
+- [x] Transcript context стал first-class state, а не временным UI-артефактом
+- [x] Контекст можно просматривать, редактировать, подрезать и снапшотить через `/ctx ...`
+- [x] Контекст живёт на диске внутри `.codecore/` и переживает рестарт процесса
+- [x] Есть markdown-backed `/issue` для логических и архитектурных проблем
+- [x] Есть markdown-backed `/ap` для execution antipatterns и tracebacks
+- [x] Есть `/kb init|add|index|show|edit|lookup` и `.codecore/knowledge/index.json`
+- [x] Есть встроенные AIDD skills: `discover`, `implement`, `fix`, `integrate`
+- [x] Есть web research slice: `/search`, `/docs`, `/verify`, `/deps`, `/proofs`
+- [x] Есть базовый MCP control plane: `/mcp list|status|add|disable|enable`
+- [x] `docs/spec.md`, `docs/antipatterns.md` и открытые `issues` автоматически попадают в prompt при наличии
+
+### Следующие элементы patch_1
+
+- [x] `/complete <phase>`
+- [x] `knowledge_lookup` как native tool в response loop
+- [x] web search + proofs + `/deps`
+- [x] базовый MCP control plane
+- [ ] split-mode `Architect / Executor`
 
 ---
 

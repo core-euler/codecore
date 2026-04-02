@@ -22,10 +22,15 @@ from .execution.shell import ShellToolExecutor
 from .execution.tests import VerificationRunner
 from .execution.worktrees import WorktreeManager
 from .governance.policy import SimplePolicyEngine
+from .infra.aidd_docs import AIDDDocsStore
+from .infra.knowledge_base import KnowledgeBaseStore
+from .infra.session_state import SessionStateStore
+from .infra.web_research import WebResearchService
 from .kernel.event_bus import EventBus
 from .kernel.orchestrator import Orchestrator
 from .memory.recall import MemoryRecallComposer
 from .memory.store import SQLiteMemoryStore
+from .mcp.control_plane import MCPControlPlane
 from .providers.adapters.base import AdapterFactory
 from .providers.broker import PolicyDrivenBroker
 from .providers.health import ProviderHealthService
@@ -74,9 +79,26 @@ def create_app() -> CodeCoreApp:
     approval_manager = ApprovalManager()
     verification_runner = VerificationRunner(tool_executor, bootstrap.settings.project_root)
     policy_engine = SimplePolicyEngine()
+    aidd_docs = AIDDDocsStore(bootstrap.settings.project_root)
+    mcp_control = MCPControlPlane(bootstrap.settings.mcp_registry_path, bootstrap.mcp_registry)
+    knowledge_base = KnowledgeBaseStore(
+        bootstrap.settings.project_root,
+        bootstrap.settings.config_dir,
+        bootstrap.settings.knowledge_index_path,
+    )
+    session_store = SessionStateStore(
+        bootstrap.settings.session_state_path,
+        bootstrap.settings.context_edit_path,
+        bootstrap.settings.context_snapshot_dir,
+    )
+    web_research = WebResearchService()
     event_bus = EventBus(sinks=[tracker, memory_store])
     context_manager = ContextManager(bootstrap.settings.project_root)
-    native_tools = NativeRepositoryTools(context_manager, RepoMapBuilder(bootstrap.settings.project_root))
+    native_tools = NativeRepositoryTools(
+        context_manager,
+        RepoMapBuilder(bootstrap.settings.project_root),
+        knowledge_base_store=knowledge_base,
+    )
     skill_dirs = [bootstrap.settings.skills_dir]
     if bootstrap.settings.legacy_skills_dir.exists() and bootstrap.settings.legacy_skills_dir != bootstrap.settings.skills_dir:
         skill_dirs.append(bootstrap.settings.legacy_skills_dir)
@@ -134,6 +156,11 @@ def create_app() -> CodeCoreApp:
         file_change_audit=file_change_audit,
         approval_manager=approval_manager,
         verification_engine=verification_runner,
+        session_store=session_store,
+        aidd_docs_store=aidd_docs,
+        knowledge_base_store=knowledge_base,
+        web_research_service=web_research,
+        mcp_control_plane=mcp_control,
     )
     repl = Repl(orchestrator=orchestrator, console=Console())
     repl.history_path = str(bootstrap.settings.repl_history_path)

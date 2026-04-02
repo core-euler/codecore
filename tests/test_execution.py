@@ -29,6 +29,7 @@ from codecore.execution.shell import ShellToolExecutor, summarize_output
 from codecore.execution.tests import VerificationRunner
 from codecore.governance.policy import SimplePolicyEngine
 from codecore.infra.manifest_loader import load_project_manifest, load_provider_registry
+from codecore.infra.knowledge_base import KnowledgeBaseStore
 from codecore.infra.project_manifest import ProjectManifest
 from codecore.kernel.event_bus import EventBus
 from codecore.kernel.orchestrator import Orchestrator
@@ -361,6 +362,68 @@ class ExecutionRuntimeTest(unittest.TestCase):
 
             output = asyncio.run(run())
             self.assertIn("bot/states.py", output)
+            self.assertEqual(adapter_factory.calls, 2)
+
+    def test_prompt_tool_loop_uses_knowledge_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            docs_dir = temp_path / "docs"
+            docs_dir.mkdir()
+            (docs_dir / "spec.md").write_text("# Spec\n\nJWT auth middleware is required for API routes.\n", encoding="utf-8")
+            registry = ProviderRegistry(load_provider_registry(ROOT / ".codecore" / "providers" / "registry.yaml"))
+            adapter_factory = ScriptedSequenceAdapterFactory(
+                [
+                    json.dumps(
+                        {
+                            "type": "tool_call",
+                            "message": "Looking up the spec entry for auth.",
+                            "tool_call": {"name": "knowledge_lookup", "args": {"query": "jwt auth", "max_results": 2}},
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "final",
+                            "message": "Спека говорит, что для API-роутов нужен JWT auth middleware.",
+                        }
+                    ),
+                ]
+            )
+            health = ProviderHealthService(registry, adapter_factory)
+            session = new_session_runtime()
+            runtime_state = RuntimeState.default()
+            context_manager = ContextManager(temp_path)
+            knowledge_store = KnowledgeBaseStore(
+                temp_path,
+                temp_path / ".codecore",
+                temp_path / ".codecore" / "knowledge" / "index.json",
+            )
+            knowledge_store.index_docs()
+            orchestrator = Orchestrator(
+                session=session,
+                runtime_state=runtime_state,
+                provider_registry=registry,
+                broker=PolicyDrivenBroker(registry, health),
+                health_service=health,
+                adapter_factory=adapter_factory,
+                context_manager=context_manager,
+                context_composer=DefaultContextComposer(
+                    context_manager,
+                    session,
+                    runtime_state,
+                    ProjectManifest(project_id="temp-knowledge-loop"),
+                ),
+                event_bus=EventBus(sinks=[]),
+                native_tool_executor=NativeRepositoryTools(context_manager, knowledge_base_store=knowledge_store),
+                knowledge_base_store=knowledge_store,
+            )
+
+            async def run() -> str:
+                result = await orchestrator.handle_line("Что в спеке сказано про auth middleware?")
+                self.assertFalse(result.is_error)
+                return result.output or ""
+
+            output = asyncio.run(run())
+            self.assertIn("JWT auth middleware", output)
             self.assertEqual(adapter_factory.calls, 2)
 
     def test_prompt_requires_json_response_envelope(self) -> None:

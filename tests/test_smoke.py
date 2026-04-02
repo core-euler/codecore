@@ -48,6 +48,8 @@ class BootstrapSmokeTest(unittest.TestCase):
                 self.assertTrue(settings.provider_registry_path.exists())
                 self.assertTrue(settings.mcp_registry_path.exists())
                 self.assertTrue(settings.skills_dir.exists())
+                self.assertTrue((settings.skills_dir / "discover" / "SKILL.md").exists())
+                self.assertTrue((settings.skills_dir / "implement" / "SKILL.md").exists())
             finally:
                 os.chdir(previous)
 

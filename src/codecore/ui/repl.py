@@ -44,6 +44,13 @@ _COMMAND_OPTIONS: dict[str, tuple[str, ...]] = {
     "benchmark": ("--models", "--pipeline", "--verify"),
 }
 
+_CTX_ACTIONS = ("show", "edit", "trim", "clear", "save", "load")
+_ISSUE_ACTIONS = ("list", "close")
+_AP_ACTIONS = ("list", "search")
+_SKILL_ACTIONS = ("list", "load", "edit", "new", "clear")
+_KB_ACTIONS = ("init", "add", "index", "show", "edit", "lookup")
+_MCP_ACTIONS = ("list", "status", "add", "disable", "enable")
+
 
 class SlashCommandCompleter(Completer):
     def __init__(self, orchestrator: Orchestrator | None = None) -> None:
@@ -94,8 +101,11 @@ class SlashCommandCompleter(Completer):
 
         if command == "model" and arg_index == 0:
             yield from self._yield_values(self._model_candidates(), current_token, meta="model")
-        elif command == "skill" and arg_index == 0:
-            yield from self._yield_values(("clear", *self._skill_candidates()), current_token, meta="skill")
+        elif command == "skill":
+            if arg_index == 0:
+                yield from self._yield_values((*_SKILL_ACTIONS, *self._skill_candidates()), current_token, meta="skill")
+            elif arg_index == 1 and previous_token in {"load", "edit"}:
+                yield from self._yield_values(self._skill_candidates(), current_token, meta="skill")
         elif command == "tag" and arg_index == 0:
             yield from self._yield_values(tuple(tag.value for tag in TaskTag), current_token, meta="task tag")
         elif command == "rate" and arg_index == 0:
@@ -115,6 +125,32 @@ class SlashCommandCompleter(Completer):
             yield from self._yield_values(candidates, current_token, meta="path")
         elif command == "replace" and self._replace_expects_path(args, arg_index):
             yield from self._yield_values(self._workspace_file_candidates(current_token), current_token, meta="file")
+        elif command == "ctx":
+            if arg_index == 0:
+                yield from self._yield_values(_CTX_ACTIONS, current_token, meta="context action")
+            elif arg_index == 1 and previous_token == "trim":
+                yield from self._yield_values(("user", "last", "1", "2", "3"), current_token, meta="trim target")
+            elif arg_index == 1 and previous_token == "load":
+                yield from self._yield_values(self._context_snapshot_candidates(), current_token, meta="snapshot")
+        elif command == "issue":
+            if arg_index == 0:
+                yield from self._yield_values(_ISSUE_ACTIONS, current_token, meta="issue action")
+            elif arg_index == 1 and previous_token == "close":
+                yield from self._yield_values(self._issue_id_candidates(), current_token, meta="issue id")
+        elif command == "ap" and arg_index == 0:
+            yield from self._yield_values(_AP_ACTIONS, current_token, meta="antipattern action")
+        elif command == "kb":
+            if arg_index == 0:
+                yield from self._yield_values(_KB_ACTIONS, current_token, meta="knowledge action")
+            elif arg_index == 1 and previous_token in {"add", "edit"}:
+                yield from self._yield_values(self._knowledge_doc_candidates(), current_token, meta="knowledge doc")
+        elif command == "mcp":
+            if arg_index == 0:
+                yield from self._yield_values(_MCP_ACTIONS, current_token, meta="mcp action")
+            elif arg_index == 1 and previous_token in {"disable", "enable"}:
+                yield from self._yield_values(self._mcp_server_candidates(), current_token, meta="mcp server")
+            elif arg_index == 1 and previous_token == "add":
+                yield from self._yield_values(("filesystem", "git"), current_token, meta="mcp preset")
 
     @staticmethod
     def _yield_values(values: tuple[str, ...], current_token: str, *, meta: str):
@@ -191,6 +227,33 @@ class SlashCommandCompleter(Completer):
         if session is None:
             return ()
         return tuple(session.active_files)
+
+    def _context_snapshot_candidates(self) -> tuple[str, ...]:
+        store = getattr(self._orchestrator, "session_store", None) if self._orchestrator is not None else None
+        if store is None or not hasattr(store, "list_snapshots"):
+            return ()
+        return tuple(store.list_snapshots())
+
+    def _issue_id_candidates(self) -> tuple[str, ...]:
+        store = getattr(self._orchestrator, "aidd_docs_store", None) if self._orchestrator is not None else None
+        if store is None or not hasattr(store, "list_issues"):
+            return ()
+        return tuple(item.entry_id for item in store.list_issues(include_closed=True))
+
+    def _knowledge_doc_candidates(self) -> tuple[str, ...]:
+        store = getattr(self._orchestrator, "knowledge_base_store", None) if self._orchestrator is not None else None
+        if store is None or not hasattr(store, "load_documents"):
+            return ()
+        values: list[str] = []
+        for item in store.load_documents():
+            values.extend((item.doc_id, item.path))
+        return tuple(dict.fromkeys(values))
+
+    def _mcp_server_candidates(self) -> tuple[str, ...]:
+        control = getattr(self._orchestrator, "mcp_control_plane", None) if self._orchestrator is not None else None
+        if control is None or not hasattr(control, "list_servers"):
+            return ()
+        return tuple(item.server_id for item in control.list_servers())
 
     def _workspace_file_candidates(self, current_token: str) -> tuple[str, ...]:
         if self._orchestrator is None:

@@ -9,6 +9,7 @@ from ..context.manager import ContextManager
 from ..context.repo_map import RepoMapBuilder
 from ..domain.enums import ToolKind
 from ..domain.results import ToolExecutionResult
+from ..infra.knowledge_base import KnowledgeBaseStore
 from .shell import summarize_output
 
 _IGNORED_DIRS = {
@@ -31,9 +32,15 @@ class NativeToolCall:
 
 
 class NativeRepositoryTools:
-    def __init__(self, context_manager: ContextManager, repo_map_builder: RepoMapBuilder | None = None) -> None:
+    def __init__(
+        self,
+        context_manager: ContextManager,
+        repo_map_builder: RepoMapBuilder | None = None,
+        knowledge_base_store: KnowledgeBaseStore | None = None,
+    ) -> None:
         self._context_manager = context_manager
         self._repo_map_builder = repo_map_builder or RepoMapBuilder(context_manager.project_root)
+        self._knowledge_base_store = knowledge_base_store
 
     def execute(self, call: NativeToolCall) -> ToolExecutionResult:
         tool = call.tool.strip().lower()
@@ -45,6 +52,8 @@ class NativeRepositoryTools:
             return self._list(call.args)
         if tool == "repo_map":
             return self._repo_map(call.args)
+        if tool == "knowledge_lookup":
+            return self._knowledge_lookup(call.args)
         return ToolExecutionResult(
             tool_kind=ToolKind.FILESYSTEM,
             command=f"{tool}",
@@ -154,6 +163,34 @@ class NativeRepositoryTools:
             exit_code=0,
             stdout=rendered,
             metadata={"tool": "repo_map", "max_depth": max_depth},
+        )
+
+    def _knowledge_lookup(self, args: dict[str, object]) -> ToolExecutionResult:
+        if self._knowledge_base_store is None:
+            return self._error("knowledge_lookup", "Knowledge base is not configured.")
+        query = str(args.get("query", "")).strip()
+        if not query:
+            return self._error("knowledge_lookup", "Argument 'query' is required.")
+        max_results = self._coerce_int(args.get("max_results"), default=3, minimum=1)
+        matches = self._knowledge_base_store.lookup(query, limit=max_results)
+        if not matches:
+            return ToolExecutionResult(
+                tool_kind=ToolKind.FILESYSTEM,
+                command=f"knowledge_lookup {query}",
+                exit_code=0,
+                stdout=f"No knowledge documents matched '{query}'.",
+                metadata={"tool": "knowledge_lookup", "query": query, "match_count": 0},
+            )
+        rendered = "\n\n".join(
+            f"SOURCE {item.path} ({item.doc_id}) score={item.score}\n{item.excerpt}" for item in matches
+        )
+        return ToolExecutionResult(
+            tool_kind=ToolKind.FILESYSTEM,
+            command=f"knowledge_lookup {query}",
+            exit_code=0,
+            stdout=summarize_output(rendered, max_chars=4000).rendered,
+            affected_files=tuple(item.path for item in matches),
+            metadata={"tool": "knowledge_lookup", "query": query, "match_count": len(matches)},
         )
 
     def _error(self, tool: str, message: str, *, path: str | None = None) -> ToolExecutionResult:

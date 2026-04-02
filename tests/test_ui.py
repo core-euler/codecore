@@ -106,6 +106,95 @@ class ReplCompletionTest(unittest.TestCase):
             texts = {completion.text for completion in completions}
             self.assertIn("src/app.py", texts)
 
+    def test_slash_command_completer_suggests_ctx_actions(self) -> None:
+        completer = SlashCommandCompleter(SimpleNamespace(
+            provider_registry=SimpleNamespace(list_registered=lambda: ()),
+            skill_registry=None,
+            approval_manager=None,
+            multi_agent_runner=None,
+            session=SimpleNamespace(active_files=[]),
+            context_manager=SimpleNamespace(project_root=ROOT),
+            session_store=SimpleNamespace(list_snapshots=lambda: ("before-auth",)),
+            aidd_docs_store=SimpleNamespace(list_issues=lambda include_closed=True: (SimpleNamespace(entry_id="ISSUE-001"),)),
+        ))
+
+        completions = list(completer.get_completions(Document("/ctx l"), None))
+
+        texts = {completion.text for completion in completions}
+        self.assertIn("load", texts)
+
+    def test_slash_command_completer_suggests_issue_actions(self) -> None:
+        completer = SlashCommandCompleter(SimpleNamespace(
+            provider_registry=SimpleNamespace(list_registered=lambda: ()),
+            skill_registry=None,
+            approval_manager=None,
+            multi_agent_runner=None,
+            session=SimpleNamespace(active_files=[]),
+            context_manager=SimpleNamespace(project_root=ROOT),
+            session_store=SimpleNamespace(list_snapshots=lambda: ()),
+            aidd_docs_store=SimpleNamespace(list_issues=lambda include_closed=True: (SimpleNamespace(entry_id="ISSUE-001"),)),
+        ))
+
+        completions = list(completer.get_completions(Document("/issue c"), None))
+
+        texts = {completion.text for completion in completions}
+        self.assertIn("close", texts)
+
+    def test_slash_command_completer_suggests_skill_actions(self) -> None:
+        completer = SlashCommandCompleter(SimpleNamespace(
+            provider_registry=SimpleNamespace(list_registered=lambda: ()),
+            skill_registry=SimpleNamespace(skill_ids=lambda: ("discover", "implement")),
+            approval_manager=None,
+            multi_agent_runner=None,
+            session=SimpleNamespace(active_files=[]),
+            context_manager=SimpleNamespace(project_root=ROOT),
+            session_store=SimpleNamespace(list_snapshots=lambda: ()),
+            aidd_docs_store=SimpleNamespace(list_issues=lambda include_closed=True: ()),
+        ))
+
+        completions = list(completer.get_completions(Document("/skill l"), None))
+
+        texts = {completion.text for completion in completions}
+        self.assertIn("list", texts)
+        self.assertIn("load", texts)
+
+    def test_slash_command_completer_suggests_kb_actions(self) -> None:
+        completer = SlashCommandCompleter(SimpleNamespace(
+            provider_registry=SimpleNamespace(list_registered=lambda: ()),
+            skill_registry=None,
+            approval_manager=None,
+            multi_agent_runner=None,
+            session=SimpleNamespace(active_files=[]),
+            context_manager=SimpleNamespace(project_root=ROOT),
+            session_store=SimpleNamespace(list_snapshots=lambda: ()),
+            aidd_docs_store=SimpleNamespace(list_issues=lambda include_closed=True: ()),
+            knowledge_base_store=SimpleNamespace(load_documents=lambda: (SimpleNamespace(doc_id="spec", path="docs/spec.md"),)),
+        ))
+
+        completions = list(completer.get_completions(Document("/kb e"), None))
+
+        texts = {completion.text for completion in completions}
+        self.assertIn("edit", texts)
+
+    def test_slash_command_completer_suggests_mcp_actions(self) -> None:
+        completer = SlashCommandCompleter(SimpleNamespace(
+            provider_registry=SimpleNamespace(list_registered=lambda: ()),
+            skill_registry=None,
+            approval_manager=None,
+            multi_agent_runner=None,
+            session=SimpleNamespace(active_files=[]),
+            context_manager=SimpleNamespace(project_root=ROOT),
+            session_store=SimpleNamespace(list_snapshots=lambda: ()),
+            aidd_docs_store=SimpleNamespace(list_issues=lambda include_closed=True: ()),
+            knowledge_base_store=SimpleNamespace(load_documents=lambda: ()),
+            mcp_control_plane=SimpleNamespace(list_servers=lambda: (SimpleNamespace(server_id="filesystem"),)),
+        ))
+
+        completions = list(completer.get_completions(Document("/mcp d"), None))
+
+        texts = {completion.text for completion in completions}
+        self.assertIn("disable", texts)
+
 
 class _GateOrchestrator:
     def __init__(self) -> None:

@@ -13,6 +13,10 @@ class SkillLoader:
     def __init__(self, roots: tuple[Path, ...]) -> None:
         self._roots = roots
 
+    @property
+    def roots(self) -> tuple[Path, ...]:
+        return self._roots
+
     def discover_files(self) -> tuple[Path, ...]:
         files: list[Path] = []
         seen: set[Path] = set()
