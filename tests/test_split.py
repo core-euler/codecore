@@ -104,6 +104,40 @@ class SplitCoordinatorTest(unittest.TestCase):
         overview = coordinator.render_overview()
         self.assertIn("execution: `incremental`", overview)
 
+    def test_render_role_panel_includes_recent_events(self) -> None:
+        architect = _StubOrchestrator("architect")
+        architect.session.transcript.append(SimpleNamespace(role="assistant", content="Plan auth middleware"))
+        executor = _StubOrchestrator("executor")
+        coordinator = SplitCoordinator(
+            architect=SplitRoleRuntime(role="architect", orchestrator=architect),
+            executor=SplitRoleRuntime(role="executor", orchestrator=executor),
+        )
+        coordinator.recent_system_events.append("[architect] Focus switched to architect.")
+
+        panel = coordinator.render_role_panel("architect")
+
+        self.assertIn("ARCHITECT <ACTIVE>", panel)
+        self.assertIn("[assistant] Plan auth middleware", panel)
+        self.assertIn("latest events:", panel)
+        self.assertIn("Focus switched to architect.", panel)
+
+    def test_render_session_footer_summarizes_session(self) -> None:
+        architect = _StubOrchestrator("architect")
+        architect.session.request_count = 2
+        architect.session.total_cost_usd = 0.01
+        executor = _StubOrchestrator("executor")
+        executor.session.request_count = 3
+        executor.session.total_cost_usd = 0.02
+        coordinator = SplitCoordinator(
+            architect=SplitRoleRuntime(role="architect", orchestrator=architect),
+            executor=SplitRoleRuntime(role="executor", orchestrator=executor),
+        )
+
+        footer = coordinator.render_session_footer()
+
+        self.assertIn("req=5", footer)
+        self.assertIn("cost=$0.0300", footer)
+
     def test_architect_blocks_mutating_commands(self) -> None:
         coordinator = SplitCoordinator(
             architect=SplitRoleRuntime(role="architect", orchestrator=_StubOrchestrator("architect")),

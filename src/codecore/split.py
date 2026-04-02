@@ -5,13 +5,18 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
+from prompt_toolkit.application import Application
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
+from prompt_toolkit.layout.dimension import D
 from prompt_toolkit.shortcuts.prompt import CompleteStyle
+from prompt_toolkit.styles import Style
+from prompt_toolkit.widgets import Frame, TextArea
 from rich.console import Console
 from rich.markdown import Markdown
 
@@ -99,6 +104,7 @@ class SplitCoordinator:
     active_role: str = "architect"
     execution_mode: SplitMode = "incremental"
     last_hook: str | None = None
+    recent_system_events: list[str] = field(default_factory=list)
 
     async def start(self) -> None:
         await self.architect.orchestrator.start()
@@ -135,6 +141,8 @@ class SplitCoordinator:
         result = await self.current.orchestrator.handle_line(line)
         if self.current.role == "executor" and not result.is_error and result.output:
             self._record_executor_hook(result, before=before, after=self._workspace_snapshot())
+        if result.output:
+            self._remember_system_event(role, result.output)
         return self._prefix_result(role, result)
 
     async def _handle_global_command(self, line: str) -> CommandResult:
@@ -220,6 +228,7 @@ class SplitCoordinator:
         )
         self.last_hook = hook
         self.architect.orchestrator.session.transcript.append(ChatMessage(role="hook", content=hook))
+        self._remember_system_event("architect", hook)
 
     def _workspace_snapshot(self) -> tuple[str, ...]:
         git_workspace: GitWorkspace | None = getattr(self.executor.orchestrator, "git_workspace", None)
@@ -305,6 +314,60 @@ class SplitCoordinator:
                 return message.content.strip()
         return self.architect.orchestrator.session.last_user_prompt or ""
 
+    def render_role_panel(self, role: str) -> str:
+        runtime = self.architect if role == "architect" else self.executor
+        session = runtime.orchestrator.session
+        state = runtime.orchestrator.runtime_state
+        lines = [
+            f"{role.upper()} {'<ACTIVE>' if self.active_role == role else ''}".rstrip(),
+            build_status_line(session, state),
+        ]
+        if session.active_skills:
+            lines.append("skills: " + ", ".join(session.active_skills))
+        if session.active_files:
+            lines.append("files: " + ", ".join(session.active_files[-6:]))
+        lines.extend(("", *self._transcript_lines(session)))
+        events = self._recent_events_for(role)
+        if events:
+            lines.extend(("", "latest events:", *events))
+        return "\n".join(lines).strip()
+
+    def render_session_footer(self) -> str:
+        architect = self.architect.orchestrator.session
+        executor = self.executor.orchestrator.session
+        total_cost = architect.total_cost_usd + executor.total_cost_usd
+        total_requests = architect.request_count + executor.request_count
+        return (
+            f"session mode={self.execution_mode} | focus={self.active_role} | "
+            f"req={total_requests} | cost=${total_cost:.4f} | "
+            "Tab switch focus | Enter submit | /send dispatches Architect plan"
+        )
+
+    def _recent_events_for(self, role: str) -> tuple[str, ...]:
+        scoped: list[str] = []
+        prefix = f"[{role}] "
+        for item in reversed(self.recent_system_events):
+            if item.startswith(prefix):
+                scoped.append(item[len(prefix):])
+            if len(scoped) >= 2:
+                break
+        return tuple(reversed(scoped))
+
+    def _remember_system_event(self, role: str, output: str) -> None:
+        summary = summarize_output(output, max_chars=280).rendered
+        self.recent_system_events.append(f"[{role}] {summary}")
+        self.recent_system_events = self.recent_system_events[-12:]
+
+    @staticmethod
+    def _transcript_lines(session: SessionRuntime) -> tuple[str, ...]:
+        if not session.transcript:
+            return ("_empty_",)
+        lines: list[str] = []
+        for message in session.transcript[-10:]:
+            content = summarize_output(message.content, max_chars=420).rendered
+            lines.append(f"[{message.role}] {content}")
+        return tuple(lines)
+
     @staticmethod
     def _last_message_summary(session: SessionRuntime) -> str:
         if not session.transcript:
@@ -319,6 +382,13 @@ class SplitCodeCoreApp:
     coordinator: SplitCoordinator
     console: Console
     history_path: str | None = None
+    _application: Application | None = field(init=False, default=None)
+    _architect_view: TextArea | None = field(init=False, default=None)
+    _executor_view: TextArea | None = field(init=False, default=None)
+    _status_view: TextArea | None = field(init=False, default=None)
+    _input_view: TextArea | None = field(init=False, default=None)
+    _message_view: TextArea | None = field(init=False, default=None)
+    _busy: bool = field(init=False, default=False)
 
     def run(self) -> int:
         print(self.bootstrap.startup_summary() + f" | mode=split/{self.coordinator.execution_mode}")
@@ -335,48 +405,9 @@ class SplitCodeCoreApp:
 
     async def _run_interactive(self) -> int:
         history = FileHistory(self.history_path) if self.history_path else None
-        key_bindings = KeyBindings()
-
-        @key_bindings.add("c-j")
-        def _insert_newline(event) -> None:
-            event.current_buffer.insert_text("\n")
-
-        @key_bindings.add("enter")
-        def _submit(event) -> None:
-            event.current_buffer.validate_and_handle()
-
-        @key_bindings.add("tab")
-        def _toggle_focus(event) -> None:
-            self.coordinator.active_role = "executor" if self.coordinator.active_role == "architect" else "architect"
-
-        prompt = PromptSession(
-            history=history,
-            multiline=True,
-            key_bindings=key_bindings,
-            completer=SlashCommandCompleter(_CurrentOrchestratorProxy(self.coordinator)),
-            complete_while_typing=True,
-            complete_style=CompleteStyle.MULTI_COLUMN,
-            reserve_space_for_menu=8,
-        )
-        while True:
-            self.console.print()
-            self.console.print(Markdown(self.coordinator.render_overview()))
-            self.console.print()
-            try:
-                line = await prompt.prompt_async(f"({self.coordinator.active_role})> ")
-            except KeyboardInterrupt:
-                self.console.print("^C", style="yellow")
-                continue
-            except EOFError:
-                self.console.print()
-                return 0
-            with self.console.status(self._status_text(line), spinner="dots"):
-                result = await self.coordinator.handle_line(line)
-            if result.output:
-                self._render_output(result)
-            if result.should_exit:
-                return 0
-        return 0
+        self._application = self._build_fullscreen_application(history)
+        self._refresh_views()
+        return await self._application.run_async()
 
     async def _run_stream(self) -> int:
         for raw_line in sys.stdin:
@@ -405,6 +436,127 @@ class SplitCodeCoreApp:
         if stripped.startswith("/mode"):
             return "updating split mode"
         return "coordinating split session"
+
+    def _build_fullscreen_application(self, history) -> Application:
+        proxy = _CurrentOrchestratorProxy(self.coordinator)
+        key_bindings = KeyBindings()
+
+        @key_bindings.add("tab")
+        def _toggle_focus(event) -> None:
+            self.coordinator.active_role = "executor" if self.coordinator.active_role == "architect" else "architect"
+            self._refresh_views(message=f"focus={self.coordinator.active_role}")
+
+        @key_bindings.add("c-c")
+        def _interrupt(event) -> None:
+            event.app.exit(result=0)
+
+        architect_view = TextArea(read_only=True, focusable=False, scrollbar=True, wrap_lines=True, style="class:pane")
+        executor_view = TextArea(read_only=True, focusable=False, scrollbar=True, wrap_lines=True, style="class:pane")
+        status_view = TextArea(read_only=True, focusable=False, height=1, style="class:status")
+        message_view = TextArea(read_only=True, focusable=False, height=2, style="class:message")
+        input_view = TextArea(
+            text="",
+            multiline=False,
+            wrap_lines=False,
+            history=history,
+            completer=SlashCommandCompleter(proxy),
+            complete_while_typing=True,
+            accept_handler=self._accept_input,
+            prompt=self._input_prompt(),
+            style="class:input",
+        )
+
+        self._architect_view = architect_view
+        self._executor_view = executor_view
+        self._status_view = status_view
+        self._message_view = message_view
+        self._input_view = input_view
+
+        layout = Layout(
+            HSplit(
+                [
+                    VSplit(
+                        [
+                            Frame(architect_view, title=self._pane_title("architect")),
+                            Frame(executor_view, title=self._pane_title("executor")),
+                        ],
+                        padding=1,
+                    ),
+                    Window(height=1, char="─", style="class:divider"),
+                    status_view,
+                    message_view,
+                    input_view,
+                ]
+            )
+        )
+        return Application(
+            layout=layout,
+            key_bindings=key_bindings,
+            full_screen=True,
+            mouse_support=False,
+            style=Style.from_dict(
+                {
+                    "pane": "bg:#0f1720 #d7dde8",
+                    "frame.label": "bg:#1b2a3a #d7dde8 bold",
+                    "status": "bg:#25364a #d7dde8",
+                    "message": "bg:#111827 #b7c3d0",
+                    "input": "bg:#0b1220 #f8fafc",
+                    "divider": "#334155",
+                }
+            ),
+        )
+
+    def _accept_input(self, buffer) -> bool:
+        line = buffer.text
+        buffer.text = ""
+        if self._busy:
+            self._refresh_views(message="busy: wait for the current action to finish")
+            return False
+        asyncio.create_task(self._process_line(line))
+        return False
+
+    async def _process_line(self, line: str) -> None:
+        if not line.strip():
+            self._refresh_views()
+            return
+        self._busy = True
+        self._refresh_views(message=self._status_text(line))
+        result = await self.coordinator.handle_line(line)
+        message = summarize_output(result.output or "ok", max_chars=280).rendered if result.output else "ok"
+        self._busy = False
+        self._refresh_views(message=message)
+        if result.should_exit and self._application is not None:
+            self._application.exit(result=0)
+
+    def _refresh_views(self, *, message: str | None = None) -> None:
+        if self._architect_view is None or self._executor_view is None or self._status_view is None or self._input_view is None or self._message_view is None:
+            return
+        self._architect_view.text = self.coordinator.render_role_panel("architect")
+        self._executor_view.text = self.coordinator.render_role_panel("executor")
+        self._status_view.text = self.coordinator.render_session_footer()
+        self._message_view.text = message or self.coordinator.last_hook or "ready"
+        self._input_view.prompt = self._input_prompt()
+        container = self._application.layout.container if self._application is not None else None
+        if isinstance(container, HSplit):
+            top = container.children[0]
+            if isinstance(top, VSplit):
+                left = top.children[0]
+                right = top.children[1]
+                if isinstance(left, Frame):
+                    left.title = self._pane_title("architect")
+                if isinstance(right, Frame):
+                    right.title = self._pane_title("executor")
+        if self._application is not None:
+            self._application.invalidate()
+
+    def _pane_title(self, role: str) -> str:
+        marker = " *" if self.coordinator.active_role == role else ""
+        role_name = "ARCHITECT" if role == "architect" else "EXECUTOR"
+        return f"{role_name}{marker}"
+
+    def _input_prompt(self) -> str:
+        busy = "busy" if self._busy else self.coordinator.active_role
+        return f"({busy})> "
 
 
 def create_split_app(*, mode: SplitMode = "incremental") -> SplitCodeCoreApp:

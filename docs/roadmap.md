@@ -1,6 +1,6 @@
 # CodeCore Roadmap
 ## Живой roadmap проекта с текущим статусом, этапами и критериями готовности
-`updated: 2026-04-02 (AIDD patch 1: split Architect/Executor foundation integrated)`
+`updated: 2026-04-02 (AIDD patch 1: split Architect/Executor two-pane TUI integrated)`
 
 ---
 
@@ -71,6 +71,7 @@
 - [x] Есть `/ctx show|edit|trim|clear|save|load`
 - [x] Есть split-mode foundation: `python -m codecore --split`, role focus, `/send`, role-isolated session state
 - [x] Есть split role discipline: `incremental/rebuild`, Architect-owned research, proof handoff в Executor prompt
+- [x] Есть fullscreen two-pane split TUI поверх `prompt_toolkit`
 
 ### Чего пока нет
 
@@ -82,7 +83,7 @@
 - [x] Есть базовый security hardening slice: threat model, redaction, untrusted-content guardrails
 - [x] AIDD docs loop: `/issue`, `/ap`, `/complete`
 - [x] Knowledge base loop: `/kb`, docs indexing, `knowledge_lookup`
-- [~] Split Architect/Executor mode: foundation есть, полноценный TUI ещё не доведён
+- [~] Split Architect/Executor mode: рабочий two-pane TUI есть, но ещё не доведён до polish-уровня
 
 ### Текущая фаза
 
@@ -131,7 +132,7 @@
 - [x] `knowledge_lookup` как native tool в response loop
 - [x] web search + proofs + `/deps`
 - [x] базовый MCP control plane
-- [~] split-mode `Architect / Executor`: foundation есть, role discipline и proof handoff есть, rich two-pane TUI ещё не реализован
+- [~] split-mode `Architect / Executor`: two-pane TUI, role discipline и proof handoff есть; нужен UX polish и deeper agent workflows
 
 ---
 
