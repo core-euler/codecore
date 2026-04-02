@@ -29,6 +29,10 @@ dist/
 .codecore/session.json
 .codecore/context.md
 .codecore/snapshots/
+.codecore/architect-session.json
+.codecore/architect-context.md
+.codecore/executor-session.json
+.codecore/executor-context.md
 
 # Editor files
 .vscode/

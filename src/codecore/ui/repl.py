@@ -66,7 +66,7 @@ class SlashCommandCompleter(Completer):
             yield from self._argument_completions(current_line)
             return
         typed = current_line[1:]
-        for spec in COMMAND_SPECS:
+        for spec in self._command_specs():
             if typed and not spec.name.startswith(typed):
                 continue
             yield Completion(
@@ -151,6 +151,10 @@ class SlashCommandCompleter(Completer):
                 yield from self._yield_values(self._mcp_server_candidates(), current_token, meta="mcp server")
             elif arg_index == 1 and previous_token == "add":
                 yield from self._yield_values(("filesystem", "git"), current_token, meta="mcp preset")
+        elif command == "focus" and arg_index == 0:
+            yield from self._yield_values(("architect", "executor"), current_token, meta="split role")
+        elif command == "mode" and arg_index == 0:
+            yield from self._yield_values(("incremental", "rebuild"), current_token, meta="split mode")
 
     @staticmethod
     def _yield_values(values: tuple[str, ...], current_token: str, *, meta: str):
@@ -188,6 +192,12 @@ class SlashCommandCompleter(Completer):
                 values.append(item.model.alias)
             values.append(item.model.id)
         return tuple(dict.fromkeys(values))
+
+    def _command_specs(self):
+        if self._orchestrator is None:
+            return COMMAND_SPECS
+        specs = getattr(self._orchestrator, "command_specs", None)
+        return specs if specs is not None else COMMAND_SPECS
 
     def _skill_candidates(self) -> tuple[str, ...]:
         registry = getattr(self._orchestrator, "skill_registry", None) if self._orchestrator is not None else None

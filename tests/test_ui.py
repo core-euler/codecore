@@ -195,6 +195,25 @@ class ReplCompletionTest(unittest.TestCase):
         texts = {completion.text for completion in completions}
         self.assertIn("disable", texts)
 
+    def test_slash_command_completer_includes_split_commands_from_runtime(self) -> None:
+        completer = SlashCommandCompleter(SimpleNamespace(
+            command_specs=(
+                SimpleNamespace(name="focus", description="split focus"),
+                SimpleNamespace(name="mode", description="split mode"),
+            ),
+            provider_registry=SimpleNamespace(list_registered=lambda: ()),
+            skill_registry=None,
+            approval_manager=None,
+            multi_agent_runner=None,
+            session=SimpleNamespace(active_files=[]),
+            context_manager=SimpleNamespace(project_root=ROOT),
+        ))
+
+        completions = list(completer.get_completions(Document("/m"), None))
+
+        texts = {completion.text for completion in completions}
+        self.assertIn("mode", texts)
+
 
 class _GateOrchestrator:
     def __init__(self) -> None:
