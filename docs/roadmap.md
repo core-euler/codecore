@@ -507,7 +507,7 @@
 
 ### DevOps and release
 
-- [ ] CI workflow
+- [x] CI workflow
 - [ ] Lint + typecheck + tests in CI
 - [ ] Versioning policy
 - [ ] Packaging / install story
