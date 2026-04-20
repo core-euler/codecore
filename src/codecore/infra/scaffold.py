@@ -68,16 +68,6 @@ DEFAULT_PROVIDER_REGISTRY = """providers:
         max_context: 200000
         supports_tools: true
         supports_json: true
-  - provider_id: mock
-    transport: internal
-    priority: 999
-    vpn_required: false
-    models:
-      - id: mock-chat
-        alias: mock
-        max_context: 16000
-        supports_tools: false
-        supports_json: true
 """
 
 DEFAULT_PROJECT_TEMPLATE = """version: 1

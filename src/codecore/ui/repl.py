@@ -21,8 +21,10 @@ from rich.markdown import Markdown
 from rich.text import Text
 
 from ..domain.enums import TaskTag
+from ..infra.llm_setup import LLMSetupService
 from ..kernel.orchestrator import Orchestrator
 from .commands import COMMAND_SPECS
+from .llm_setup import ensure_llm_ready
 from .statusbar import build_status_line
 
 _IGNORED_COMPLETION_DIRS = {
@@ -315,8 +317,11 @@ class Repl:
     console: Console
     history_path: str | None = None
     modal_selector: ModalSelector | None = None
+    llm_setup: LLMSetupService | None = None
 
     async def run(self) -> int:
+        if self.llm_setup is not None and not await ensure_llm_ready(self.console, self.llm_setup):
+            return 1
         await self.orchestrator.start()
         try:
             if sys.stdin.isatty():

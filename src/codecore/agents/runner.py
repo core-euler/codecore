@@ -438,7 +438,7 @@ class MultiAgentRunner:
         snapshot = await self._health_service.refresh()
         aliases: list[str] = []
         if self._provider_registry is None:
-            return (self._runtime_state.manual_model_alias,) if self._runtime_state.manual_model_alias else ("mock",)
+            return (self._runtime_state.manual_model_alias,) if self._runtime_state.manual_model_alias else ()
         for route in self._provider_registry.ordered_routes():
             key = self._health_service.route_key(route)
             status = snapshot.get(key)
@@ -449,7 +449,7 @@ class MultiAgentRunner:
             return tuple(aliases)
         if self._runtime_state.manual_model_alias:
             return (self._runtime_state.manual_model_alias,)
-        return ("mock",)
+        return ()
 
     def _sync_active_files_to_workspace(self, active_files: tuple[str, ...], workspace_root: Path) -> None:
         source = WorkspaceFiles(self._project_root, self._artifact_dir / "source-sync")

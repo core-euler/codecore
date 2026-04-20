@@ -14,6 +14,7 @@ class Settings:
     config_dir: Path
     codex_home: Path
     project_config_path: Path
+    auth_env_path: Path
     skills_dir: Path
     legacy_skills_dir: Path
     provider_registry_path: Path
@@ -34,6 +35,7 @@ def load_settings() -> Settings:
     scaffold = ensure_project_scaffold(project_root)
     codex_home = project_root / ".codecore-home"
     project_config_path = scaffold.project_manifest_path
+    auth_env_path = scaffold.config_dir / "auth.env"
     skills_dir = scaffold.skills_dir
     provider_registry_path = scaffold.provider_registry_path
     mcp_registry_path = scaffold.mcp_registry_path
@@ -53,6 +55,7 @@ def load_settings() -> Settings:
         config_dir=scaffold.config_dir,
         codex_home=codex_home,
         project_config_path=project_config_path,
+        auth_env_path=auth_env_path,
         skills_dir=skills_dir,
         legacy_skills_dir=scaffold.legacy_skills_dir,
         provider_registry_path=provider_registry_path,

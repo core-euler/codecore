@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -12,9 +14,11 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+
 from codecore.context.composer import DefaultContextComposer
 from codecore.context.manager import ContextManager
-from codecore.domain.models import ChatMessage, ChatRequest
+from codecore.domain.models import ChatMessage, ChatRequest, ChatResult
 from codecore.domain.enums import TaskTag
 from codecore.infra.manifest_loader import load_project_manifest
 from codecore.kernel.event_bus import EventBus
@@ -25,6 +29,7 @@ from codecore.memory.recall import MemoryRecallComposer
 from codecore.memory.store import SQLiteMemoryStore
 from codecore.providers.adapters.base import AdapterFactory
 from codecore.providers.broker import PolicyDrivenBroker
+from codecore.providers.capabilities import route_capabilities
 from codecore.providers.health import ProviderHealthService
 from codecore.providers.registry import ProviderRegistry
 from codecore.telemetry.analytics import TelemetryAnalytics
@@ -32,7 +37,46 @@ from codecore.telemetry.tracker import TelemetryTracker
 from codecore.infra.manifest_loader import load_provider_registry
 
 
+class ScriptedAdapter:
+    def __init__(self, route, response_text: str) -> None:
+        self._route = route
+        self._response_text = response_text
+
+    async def chat(self, request):
+        return ChatResult(text=self._response_text, latency_ms=5, metadata={"scripted": True})
+
+    async def stream(self, request):
+        yield self._response_text
+
+    async def health(self):
+        from codecore.domain.enums import HealthState
+        from codecore.domain.models import HealthStatus
+
+        return HealthStatus(state=HealthState.HEALTHY, checked_at=HealthStatus.unknown().checked_at, detail="ok")
+
+    def capabilities(self):
+        return route_capabilities(self._route)
+
+
+class ScriptedAdapterFactory:
+    def __init__(self, response_text: str) -> None:
+        self._response_text = response_text
+
+    def create(self, route):
+        return ScriptedAdapter(route, self._response_text)
+
+
 class TelemetryProjectionTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._previous_deepseek_api_key = os.environ.get("DEEPSEEK_API_KEY")
+        os.environ["DEEPSEEK_API_KEY"] = "test-key"
+
+    def tearDown(self) -> None:
+        if self._previous_deepseek_api_key is None:
+            os.environ.pop("DEEPSEEK_API_KEY", None)
+        else:
+            os.environ["DEEPSEEK_API_KEY"] = self._previous_deepseek_api_key
+
     def test_prompt_writes_request_projection(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -42,7 +86,8 @@ class TelemetryProjectionTest(unittest.TestCase):
             session.task_tag = TaskTag.GENERAL
             runtime_state = RuntimeState.default()
             registry = ProviderRegistry(load_provider_registry(ROOT / "providers" / "registry.yaml"))
-            health = ProviderHealthService(registry, AdapterFactory())
+            adapter_factory = ScriptedAdapterFactory(json.dumps({"type": "final", "message": "hello from telemetry"}))
+            health = ProviderHealthService(registry, adapter_factory)
             context_manager = ContextManager(ROOT)
             orchestrator = Orchestrator(
                 session=session,
@@ -50,7 +95,7 @@ class TelemetryProjectionTest(unittest.TestCase):
                 provider_registry=registry,
                 broker=PolicyDrivenBroker(registry, health),
                 health_service=health,
-                adapter_factory=AdapterFactory(),
+                adapter_factory=adapter_factory,
                 context_manager=context_manager,
                 context_composer=DefaultContextComposer(
                     context_manager,
@@ -83,7 +128,8 @@ class TelemetryProjectionTest(unittest.TestCase):
             session.task_tag = TaskTag.GENERAL
             runtime_state = RuntimeState.default()
             registry = ProviderRegistry(load_provider_registry(ROOT / "providers" / "registry.yaml"))
-            health = ProviderHealthService(registry, AdapterFactory())
+            adapter_factory = ScriptedAdapterFactory(json.dumps({"type": "final", "message": "hello from telemetry"}))
+            health = ProviderHealthService(registry, adapter_factory)
             context_manager = ContextManager(ROOT)
             orchestrator = Orchestrator(
                 session=session,
@@ -91,7 +137,7 @@ class TelemetryProjectionTest(unittest.TestCase):
                 provider_registry=registry,
                 broker=PolicyDrivenBroker(registry, health),
                 health_service=health,
-                adapter_factory=AdapterFactory(),
+                adapter_factory=adapter_factory,
                 context_manager=context_manager,
                 context_composer=DefaultContextComposer(
                     context_manager,
@@ -123,7 +169,10 @@ class TelemetryProjectionTest(unittest.TestCase):
             session.task_tag = TaskTag.REVIEW
             runtime_state = RuntimeState.default()
             registry = ProviderRegistry(load_provider_registry(ROOT / "providers" / "registry.yaml"))
-            health = ProviderHealthService(registry, AdapterFactory())
+            adapter_factory = ScriptedAdapterFactory(
+                json.dumps({"type": "final", "message": "Review result for backend contract changes."})
+            )
+            health = ProviderHealthService(registry, adapter_factory)
             context_manager = ContextManager(ROOT)
             manifest = load_project_manifest(ROOT / ".codecore" / "project.yaml")
             composer = DefaultContextComposer(
@@ -139,7 +188,7 @@ class TelemetryProjectionTest(unittest.TestCase):
                 provider_registry=registry,
                 broker=PolicyDrivenBroker(registry, health),
                 health_service=health,
-                adapter_factory=AdapterFactory(),
+                adapter_factory=adapter_factory,
                 context_manager=context_manager,
                 context_composer=composer,
                 event_bus=EventBus(sinks=[tracker, memory_store]),
@@ -171,7 +220,10 @@ class TelemetryProjectionTest(unittest.TestCase):
             session.task_tag = TaskTag.REVIEW
             runtime_state = RuntimeState.default()
             registry = ProviderRegistry(load_provider_registry(ROOT / "providers" / "registry.yaml"))
-            health = ProviderHealthService(registry, AdapterFactory())
+            adapter_factory = ScriptedAdapterFactory(
+                json.dumps({"type": "final", "message": "Review result for backend contract changes."})
+            )
+            health = ProviderHealthService(registry, adapter_factory)
             context_manager = ContextManager(ROOT)
             manifest = load_project_manifest(ROOT / ".codecore" / "project.yaml")
             orchestrator = Orchestrator(
@@ -180,7 +232,7 @@ class TelemetryProjectionTest(unittest.TestCase):
                 provider_registry=registry,
                 broker=PolicyDrivenBroker(registry, health),
                 health_service=health,
-                adapter_factory=AdapterFactory(),
+                adapter_factory=adapter_factory,
                 context_manager=context_manager,
                 context_composer=DefaultContextComposer(
                     context_manager,

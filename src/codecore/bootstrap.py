@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .domain.enums import TaskTag
+from .infra.llm_setup import load_auth_env
 from .infra.settings import Settings, load_settings
 from .infra.manifest_loader import load_mcp_registry, load_project_manifest, load_provider_registry
 from .infra.project_manifest import ProjectManifest
@@ -37,6 +38,7 @@ class BootstrapContext:
 
 def bootstrap_application() -> BootstrapContext:
     settings = load_settings()
+    load_auth_env(settings.auth_env_path)
     project_manifest = load_project_manifest(settings.project_config_path)
     provider_registry = load_provider_registry(settings.provider_registry_path)
     mcp_registry = load_mcp_registry(settings.mcp_registry_path)

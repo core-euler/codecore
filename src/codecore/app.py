@@ -24,6 +24,7 @@ from .execution.worktrees import WorktreeManager
 from .governance.policy import SimplePolicyEngine
 from .infra.aidd_docs import AIDDDocsStore
 from .infra.knowledge_base import KnowledgeBaseStore
+from .infra.llm_setup import LLMSetupService
 from .infra.session_state import SessionStateStore
 from .infra.web_research import WebResearchService
 from .kernel.event_bus import EventBus
@@ -234,7 +235,17 @@ def create_app() -> CodeCoreApp:
         session=bootstrap.session,
         runtime_state=bootstrap.runtime_state,
     )
-    repl = Repl(orchestrator=orchestrator, console=Console())
+    repl = Repl(
+        orchestrator=orchestrator,
+        console=Console(),
+        llm_setup=LLMSetupService(
+            settings=bootstrap.settings,
+            project_manifest=bootstrap.project_manifest,
+            registry=deps.registry,
+            health_service=deps.health_service,
+            runtime_state=bootstrap.runtime_state,
+        ),
+    )
     repl.history_path = str(bootstrap.settings.repl_history_path)
     return CodeCoreApp(bootstrap=bootstrap, repl=repl)
 

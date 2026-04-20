@@ -42,14 +42,6 @@ class HealthyFailingAdapter:
         self._route = route
 
     async def chat(self, request):
-        if self._route.provider_id == "mock":
-            prompt = request.messages[-1].content
-            from codecore.domain.models import ChatResult
-
-            text = f"[mock:{self._route.alias}] retry please"
-            if request.json_mode:
-                text = json.dumps({"type": "final", "message": text})
-            return ChatResult(text=text, latency_ms=7)
         raise RuntimeError(f"simulated failure for {self._route.provider_id}")
 
     async def stream(self, request):
@@ -73,19 +65,23 @@ class FailingAdapterFactory:
 
 
 class ProviderBrokerTest(unittest.TestCase):
-    def test_broker_falls_back_to_mock_without_keys(self) -> None:
+    def test_broker_raises_without_configured_keys(self) -> None:
         registry = ProviderRegistry(load_provider_registry(ROOT / "providers" / "registry.yaml"))
         health = ProviderHealthService(registry, AdapterFactory())
         broker = PolicyDrivenBroker(registry, health)
 
-        async def run() -> str:
-            route = await broker.select_route(
+        async def run() -> None:
+            await broker.select_route(
                 ChatRequest(messages=(ChatMessage(role="user", content="hello"),), task_tag=TaskTag.GENERAL)
             )
-            return route.alias or route.model_id
 
-        alias = asyncio.run(run())
-        self.assertEqual(alias, "mock")
+        with patch.dict(
+            os.environ,
+            {"DEEPSEEK_API_KEY": "", "MISTRAL_API_KEY": "", "OPENROUTER_API_KEY": ""},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(Exception, "No healthy provider routes available"):
+                asyncio.run(run())
 
     def test_orchestrator_retries_next_route_on_model_error(self) -> None:
         registry = ProviderRegistry(load_provider_registry(ROOT / "providers" / "registry.yaml"))
@@ -117,7 +113,7 @@ class ProviderBrokerTest(unittest.TestCase):
             await orchestrator.start()
             result = await orchestrator.handle_line("retry please")
             await orchestrator.stop()
-            self.assertFalse(result.is_error)
+            self.assertTrue(result.is_error)
             return result.output or ""
 
         with patch.dict(
@@ -131,9 +127,9 @@ class ProviderBrokerTest(unittest.TestCase):
         ):
             output = asyncio.run(run())
         fallback_events = [event for event in sink.events if event.kind.value == "fallback.triggered"]
-        self.assertIn("[mock:mock] retry please", output)
+        self.assertIn("All provider routes failed:", output)
         self.assertGreaterEqual(len(fallback_events), 1)
-        self.assertEqual(session.last_model_alias, "mock")
+        self.assertIn(session.last_model_alias or "", {"", "claude", "codestral", "ds-r1", "ds-v3"})
 
     def test_broker_prefers_project_alias_order(self) -> None:
         registry = ProviderRegistry(load_provider_registry(ROOT / "providers" / "registry.yaml"))

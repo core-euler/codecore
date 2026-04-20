@@ -303,7 +303,7 @@ class SplitEntryPointSmokeTest(unittest.TestCase):
         proc = subprocess.run(
             [sys.executable, "-m", "codecore", "--split"],
             cwd=ROOT,
-            env={**os.environ, "PYTHONPATH": str(SRC)},
+            env={**os.environ, "PYTHONPATH": str(SRC), "DEEPSEEK_API_KEY": "test-key"},
             input="/exit\n",
             capture_output=True,
             text=True,
@@ -317,7 +317,7 @@ class SplitEntryPointSmokeTest(unittest.TestCase):
         proc = subprocess.run(
             [sys.executable, "-m", "codecore", "--split", "--mode", "rebuild"],
             cwd=ROOT,
-            env={**os.environ, "PYTHONPATH": str(SRC)},
+            env={**os.environ, "PYTHONPATH": str(SRC), "DEEPSEEK_API_KEY": "test-key"},
             input="/exit\n",
             capture_output=True,
             text=True,

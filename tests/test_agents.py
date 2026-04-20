@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import sys
 import tempfile
@@ -11,6 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+
+os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
 
 from codecore.agents import MultiAgentRunner, TaskClassifier
 from codecore.agents.models import EvaluationOutput

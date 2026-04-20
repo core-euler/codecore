@@ -28,12 +28,14 @@ from .domain.enums import PolicyAction
 from .domain.results import PolicyDecision
 from .execution.shell import summarize_output
 from .governance.policy import SimplePolicyEngine
+from .infra.llm_setup import LLMSetupService
 from .infra.session_state import SessionStateStore
 from .kernel.command_router import CommandResult
 from .kernel.orchestrator import Orchestrator
 from .kernel.runtime_state import RuntimeState
 from .kernel.session import SessionRuntime, new_session_runtime
 from .ui.commands import COMMAND_SPECS, CommandSpec
+from .ui.llm_setup import ensure_llm_ready
 from .ui.repl import SlashCommandCompleter
 from .ui.statusbar import build_status_line
 
@@ -516,6 +518,7 @@ class SplitCodeCoreApp:
     bootstrap: BootstrapContext
     coordinator: SplitCoordinator
     console: Console
+    llm_setup: LLMSetupService | None = None
     history_path: str | None = None
     _application: Application | None = field(init=False, default=None)
     _architect_view: TextArea | None = field(init=False, default=None)
@@ -530,6 +533,9 @@ class SplitCodeCoreApp:
         return asyncio.run(self._run())
 
     async def _run(self) -> int:
+        if self.llm_setup is not None and not await ensure_llm_ready(self.console, self.llm_setup):
+            return 1
+        self._sync_preferred_model_alias()
         await self.coordinator.start()
         try:
             if sys.stdin.isatty():
@@ -718,6 +724,19 @@ class SplitCodeCoreApp:
         busy = "busy" if self._busy else self.coordinator.active_role
         return f"({busy})> "
 
+    def _sync_preferred_model_alias(self) -> None:
+        if self.llm_setup is None:
+            return
+        preferred = self.llm_setup.preferred_alias()
+        if not preferred:
+            return
+        architect_state = self.coordinator.architect.orchestrator.runtime_state
+        executor_state = self.coordinator.executor.orchestrator.runtime_state
+        if not architect_state.manual_model_alias:
+            architect_state.manual_model_alias = preferred
+        if not executor_state.manual_model_alias:
+            executor_state.manual_model_alias = preferred
+
 
 def create_split_app(*, mode: SplitMode = "incremental") -> SplitCodeCoreApp:
     bootstrap = bootstrap_application()
@@ -764,13 +783,20 @@ def create_split_app(*, mode: SplitMode = "incremental") -> SplitCodeCoreApp:
         bootstrap=bootstrap,
         coordinator=coordinator,
         console=Console(),
+        llm_setup=LLMSetupService(
+            settings=bootstrap.settings,
+            project_manifest=bootstrap.project_manifest,
+            registry=deps.registry,
+            health_service=deps.health_service,
+            runtime_state=bootstrap.runtime_state,
+        ),
         history_path=str(bootstrap.settings.repl_history_path),
     )
 
 
 def _apply_split_defaults(registry, skill_registry, architect_session: SessionRuntime, architect_state: RuntimeState, executor_session: SessionRuntime, executor_state: RuntimeState) -> None:
-    architect_state.manual_model_alias = _pick_alias(registry, ("ds-r1", "claude", "ds-v3", "mock"))
-    executor_state.manual_model_alias = _pick_alias(registry, ("codestral", "ds-v3", "mock"))
+    architect_state.manual_model_alias = _pick_alias(registry, ("ds-r1", "claude", "ds-v3"))
+    executor_state.manual_model_alias = _pick_alias(registry, ("codestral", "ds-v3"))
     if skill_registry.has_skill("discover"):
         architect_session.active_skills = ["discover"]
         architect_state.active_skills = ["discover"]

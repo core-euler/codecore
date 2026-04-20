@@ -579,6 +579,11 @@ class Orchestrator:
             pipeline_hint=pipeline_hint,
             verify_requested=verify_requested,
         )
+        if not results:
+            return CommandResult(
+                output="No configured model aliases are available for benchmark. Connect an LLM first or pass --models explicitly.",
+                is_error=True,
+            )
         lines = [f"benchmark_models={len(results)}"]
         for item in results:
             status = "ok" if item.success else "failed"
